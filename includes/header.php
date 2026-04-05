@@ -1,0 +1,569 @@
+<?php
+/**
+ * Header & Authentication Template
+ * Include this in all authenticated pages
+ * Handles session checking, role-based navigation, and blue/white theme
+ */
+
+// Start session only if not already active
+if (session_status() === PHP_SESSION_NONE) {
+    session_start();
+}
+
+require_once dirname(__DIR__) . '/helpers/RoleHelper.php';
+
+// Check session and redirect to login if not authenticated
+if (!RoleHelper::isAuthenticated()) {
+    header('Location: ../index.php?error=Session expired');
+    exit;
+}
+
+// Session timeout check (30 minutes)
+$timeout = 30 * 60;
+if (time() - $_SESSION['login_time'] > $timeout) {
+    session_destroy();
+    header('Location: ../index.php?error=Session expired');
+    exit;
+}
+
+// Update last activity
+$_SESSION['login_time'] = time();
+
+// Get user info
+$user_role = RoleHelper::getRole();
+$user_email = RoleHelper::getUserEmail();
+$user_section = RoleHelper::getTeacherSection();
+
+// Dynamic page title based on current file
+function getPageTitle() {
+    $current_file = basename($_SERVER['PHP_SELF'], '.php');
+    
+    $page_titles = [
+        'dashboard' => 'Dashboard',
+        'students' => 'Students',
+        'register' => 'Student Registration',
+        'logs' => 'Attendance Logs',
+        'notifications' => 'Notifications',
+        'settings' => 'Settings',
+        'users' => 'Users',
+        'my_class' => 'My Class',
+        'attendance_report' => 'Attendance Reports',
+        'profile' => 'Profile'
+    ];
+    
+    return $page_titles[$current_file] ?? 'CAMS';
+}
+
+// Dynamic page subtitle
+function getPageSubtitle() {
+    $current_file = basename($_SERVER['PHP_SELF'], '.php');
+    
+    $page_subtitles = [
+        'dashboard' => 'System overview and attendance statistics',
+        'students' => 'Manage student records and information',
+        'register' => 'Add new students and enroll fingerprints',
+        'logs' => 'View detailed attendance records',
+        'notifications' => 'System alerts and notifications',
+        'settings' => 'System configuration and preferences',
+        'users' => 'Manage system users and permissions',
+        'my_class' => 'Your assigned students and attendance',
+        'attendance_report' => 'Generate and view attendance reports'
+    ];
+    
+    return $page_subtitles[$current_file] ?? '';
+}
+?>
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CAMS - Criminology Attendance System</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.7.2/font/bootstrap-icons.css" rel="stylesheet">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@3.7.0/dist/chart.min.js"></script>
+    <style>
+    :root {
+        --primary-dark: #1e40af;
+        --primary-blue: #2563eb;
+        --primary-light: #3b82f6;
+        --sidebar-gray: #1f2937;
+        --gray-dark: #111827;
+        --gray-medium: #6b7280;
+        --gray-light: #f9fafb;
+        --gray-lighter: #f3f4f6;
+        --white: #ffffff;
+        --success: #10b981;
+        --danger: #ef4444;
+        --border: #e5e7eb;
+    }
+
+    * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+    }
+
+    html,
+    body {
+        height: 100%;
+        width: 100%;
+    }
+
+    body {
+        background: var(--gray-lighter);
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+        margin: 0;
+        padding: 0;
+        color: var(--gray-dark);
+        overflow-x: hidden;
+    }
+
+    .page-wrapper {
+        display: flex;
+        min-height: 100vh;
+    }
+
+    /* Main Content & Header */
+    .page-content {
+        margin-left: 260px;
+        flex: 1;
+        display: flex;
+        flex-direction: column;
+        min-height: 100vh;
+    }
+
+    /* Top Header Bar */
+    .topbar {
+        background: var(--white);
+        border-bottom: 1px solid var(--border);
+        padding: 12px 24px;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+        height: 70px;
+        position: sticky;
+        top: 0;
+        z-index: 999;
+        backdrop-filter: blur(10px);
+        -webkit-backdrop-filter: blur(10px);
+    }
+
+    .topbar-left {
+        display: flex;
+        align-items: center;
+        gap: 15px;
+    }
+
+    .page-title {
+        font-size: 1.4rem;
+        font-weight: 600;
+        color: var(--gray-dark);
+        margin: 0;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+    }
+
+    .page-title i {
+        color: var(--primary-blue);
+        font-size: 1.2rem;
+    }
+
+    .page-subtitle {
+        color: var(--gray-medium);
+        font-size: 0.9rem;
+        margin-top: 4px;
+        margin-bottom: 0;
+        font-weight: 400;
+    }
+
+    .topbar-right {
+        display: flex;
+        align-items: center;
+        gap: 15px;
+    }
+
+    .user-info {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+    }
+
+    .user-avatar {
+        width: 36px;
+        height: 36px;
+        border-radius: 8px;
+        background: linear-gradient(135deg, var(--primary-blue) 0%, var(--primary-dark) 100%);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        color: var(--white);
+        font-weight: 600;
+        font-size: 0.85rem;
+    }
+
+    .user-details {
+        display: flex;
+        flex-direction: column;
+    }
+
+    .user-email {
+        font-size: 0.8rem;
+        color: var(--gray-dark);
+        font-weight: 500;
+    }
+
+    .user-role {
+        font-size: 0.7rem;
+        color: var(--gray-medium);
+        text-transform: capitalize;
+    }
+
+    .user-section {
+        font-size: 0.7rem;
+        color: var(--primary-blue);
+        font-weight: 600;
+    }
+
+    /* Main Content Area */
+    .main-content {
+        flex: 1;
+        padding: 30px;
+        overflow-y: auto;
+        overflow-x: hidden;
+        max-width: 100%;
+        background: var(--gray-lighter);
+    }
+
+    /* Cards & Components */
+    .card {
+        background: var(--white);
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+        transition: all 0.3s ease;
+    }
+
+    .card:hover {
+        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.12);
+    }
+
+    .card-header {
+        background: var(--gray-lighter);
+        border-bottom: 1px solid var(--border);
+        border-radius: 12px 12px 0 0;
+        padding: 16px 20px;
+        font-weight: 600;
+        color: var(--gray-dark);
+    }
+
+    .card-body {
+        padding: 20px;
+    }
+
+    /* Buttons */
+    .btn-primary {
+        background: var(--primary-blue);
+        border: none;
+        color: var(--white);
+        border-radius: 8px;
+        padding: 10px 18px;
+        font-weight: 500;
+        font-size: 0.9rem;
+        transition: all 0.3s ease;
+        cursor: pointer;
+    }
+
+    .btn-primary:hover {
+        background: var(--primary-dark);
+        transform: translateY(-1px);
+        box-shadow: 0 6px 16px rgba(37, 99, 235, 0.3);
+        color: var(--white);
+    }
+
+    .btn-success {
+        background: var(--success);
+        border: none;
+        color: var(--white);
+        border-radius: 8px;
+        padding: 10px 18px;
+        font-weight: 500;
+        font-size: 0.9rem;
+        transition: all 0.3s ease;
+        cursor: pointer;
+    }
+
+    .btn-success:hover {
+        background: #059669;
+        transform: translateY(-1px);
+        box-shadow: 0 6px 16px rgba(16, 185, 129, 0.3);
+        color: var(--white);
+    }
+
+    .btn-danger {
+        background: var(--danger);
+        border: none;
+        color: var(--white);
+        border-radius: 8px;
+        padding: 10px 18px;
+        font-weight: 500;
+        font-size: 0.9rem;
+        transition: all 0.3s ease;
+        cursor: pointer;
+    }
+
+    .btn-danger:hover {
+        background: #dc2626;
+        transform: translateY(-1px);
+        box-shadow: 0 6px 16px rgba(239, 68, 68, 0.3);
+        color: var(--white);
+    }
+
+    /* Forms */
+    .form-control {
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 10px 14px;
+        font-size: 0.9rem;
+        background: var(--white);
+        transition: all 0.3s ease;
+    }
+
+    .form-control:focus {
+        background: var(--white);
+        border-color: var(--primary-blue);
+        box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.1);
+    }
+
+    .form-label {
+        font-weight: 600;
+        color: var(--gray-dark);
+        margin-bottom: 8px;
+        font-size: 0.9rem;
+    }
+
+    /* Alerts */
+    .alert {
+        border: none;
+        border-radius: 8px;
+        border-left: 4px solid;
+        padding: 14px 16px;
+        font-size: 0.9rem;
+    }
+
+    .alert-success {
+        background: #f0fdf4;
+        border-color: var(--success);
+        color: #166534;
+    }
+
+    .alert-danger {
+        background: #fee2e2;
+        border-color: var(--danger);
+        color: #991b1b;
+    }
+
+    .alert-info {
+        background: #eff6ff;
+        border-color: var(--primary-blue);
+        color: #1e40af;
+    }
+
+    /* Tables */
+    .table {
+        margin: 0;
+        font-size: 0.9rem;
+    }
+
+    .table thead th {
+        background: var(--gray-lighter);
+        border-top: none;
+        border-bottom: 2px solid var(--border);
+        color: var(--gray-dark);
+        font-weight: 600;
+        padding: 14px 16px;
+        font-size: 0.85rem;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+    }
+
+    .table tbody tr {
+        border-bottom: 1px solid var(--border);
+        transition: background 0.2s;
+    }
+
+    .table tbody tr:hover {
+        background: var(--gray-lighter);
+    }
+
+    .table tbody td {
+        padding: 14px 16px;
+        vertical-align: middle;
+    }
+
+    /* Badges */
+    .badge {
+        border-radius: 6px;
+        padding: 6px 12px;
+        font-weight: 500;
+        font-size: 0.75rem;
+    }
+
+    .badge-success {
+        background: #d1fae5;
+        color: #065f46;
+    }
+
+    .badge-warning {
+        background: #fef3c7;
+        color: #92400e;
+    }
+
+    .badge-danger {
+        background: #fee2e2;
+        color: #991b1b;
+    }
+
+    /* Responsive */
+    @media (max-width: 1024px) {
+        .page-content {
+            margin-left: 240px;
+        }
+    }
+
+    @media (max-width: 768px) {
+        .page-content {
+            margin-left: 220px;
+        }
+
+        .main-content {
+            padding: 20px;
+        }
+
+        .topbar {
+            padding: 12px 20px;
+            height: 65px;
+        }
+
+        .page-title {
+            font-size: 1.2rem;
+        }
+
+        .page-title i {
+            font-size: 1.1rem;
+        }
+
+        .page-subtitle {
+            font-size: 0.85rem;
+        }
+
+        .user-details {
+            display: none;
+        }
+
+        .topbar-right {
+            gap: 10px;
+        }
+    }
+
+    @media (max-width: 640px) {
+        .page-content {
+            margin-left: 75px;
+        }
+
+        .main-content {
+            padding: 16px;
+        }
+
+        .topbar {
+            padding: 10px 16px;
+            height: 60px;
+        }
+
+        .page-title {
+            font-size: 1.1rem;
+        }
+
+        .page-title i {
+            font-size: 1rem;
+        }
+
+        .page-subtitle {
+            display: none;
+        }
+    }
+
+    /* Print Styles */
+    @media print {
+
+        .topbar,
+        .collapsed-sidebar {
+            display: none;
+        }
+
+        .page-content {
+            margin-left: 0;
+        }
+
+        .main-content {
+            padding: 0;
+        }
+    }
+    </style>
+</head>
+
+<body>
+    <div class="page-wrapper">
+        <!-- Include Collapsed Sidebar -->
+        <?php include dirname(__FILE__) . '/collapsed_sidebar.php'; ?>
+
+        <!-- Main Content Area -->
+        <div class="page-content">
+            <!-- Top Header Bar -->
+            <div class="topbar">
+                <div class="topbar-left">
+                    <h2 class="page-title">
+                        <i class="bi bi-<?php 
+                            $current_file = basename($_SERVER['PHP_SELF'], '.php');
+                            $icons = [
+                                'dashboard' => 'speedometer2',
+                                'students' => 'people',
+                                'register' => 'person-plus',
+                                'logs' => 'clock-history',
+                                'notifications' => 'bell',
+                                'settings' => 'gear',
+                                'users' => 'person-gear',
+                                'my_class' => 'mortarboard',
+                                'attendance_report' => 'graph-up'
+                            ];
+                            echo $icons[$current_file] ?? 'house';
+                        ?>"></i>
+                        <?php echo getPageTitle(); ?>
+                    </h2>
+                    <?php if (getPageSubtitle()): ?>
+                    <div class="page-subtitle"><?php echo getPageSubtitle(); ?></div>
+                    <?php endif; ?>
+                </div>
+
+                <div class="topbar-right">
+                    <div class="user-info">
+                        <div class="user-avatar">
+                            <?php echo strtoupper(substr($user_email, 0, 1)); ?>
+                        </div>
+                        <div class="user-details">
+                            <div class="user-email"><?php echo htmlspecialchars($user_email); ?></div>
+                            <div class="user-role"><?php echo htmlspecialchars($user_role); ?></div>
+                            <?php if ($user_section): ?>
+                            <div class="user-section">Section <?php echo htmlspecialchars($user_section); ?></div>
+                            <?php endif; ?>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Page Content Container -->
+            <div class="main-content">
