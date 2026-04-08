@@ -19,9 +19,31 @@ if (isset($_GET['delete'])) {
     $message_type = "success";
 }
 
-// Get all students
+// Get all students with linked fingerprint summary.
 $students = [];
-$result = $mysqli->query("SELECT id, student_id, first_name, last_name, email, year, section, status FROM students ORDER BY created_at DESC");
+$result = $mysqli->query("
+    SELECT 
+        s.id, 
+        s.student_id, 
+        s.first_name, 
+        s.last_name, 
+        s.email, 
+        s.year, 
+        s.section, 
+        s.status, 
+        COALESCE(fp_summary.fingerprint_count, 0) AS fingerprint_count, 
+        COALESCE(fp_summary.fingerprint_list, '') AS fingerprint_list 
+    FROM students s 
+    LEFT JOIN (
+        SELECT 
+            fp.student_id, 
+            COUNT(fp.id) AS fingerprint_count, 
+            GROUP_CONCAT(CONCAT('F', fp.finger_index, ':', fp.sensor_id) ORDER BY fp.finger_index SEPARATOR ', ') AS fingerprint_list 
+        FROM fingerprints fp 
+        GROUP BY fp.student_id
+    ) fp_summary ON fp_summary.student_id = s.id 
+    ORDER BY s.created_at DESC
+");
 
 while ($row = $result->fetch_assoc()) {
     $students[] = $row;
@@ -52,6 +74,7 @@ while ($row = $result->fetch_assoc()) {
                         <th>Year</th>
                         <th>Section</th>
                         <th>Email</th>
+                        <th>Fingerprints</th>
                         <th>Status</th>
                         <th>Actions</th>
                     </tr>
@@ -64,6 +87,14 @@ while ($row = $result->fetch_assoc()) {
                         <td><?php echo $student['year']; ?></td>
                         <td><?php echo htmlspecialchars($student['section']); ?></td>
                         <td><small><?php echo htmlspecialchars($student['email']); ?></small></td>
+                        <td>
+                            <?php if ((int)$student['fingerprint_count'] > 0): ?>
+                                <span class="badge bg-primary"><?php echo (int)$student['fingerprint_count']; ?> linked</span>
+                                <div class="small text-muted mt-1"><?php echo htmlspecialchars($student['fingerprint_list']); ?></div>
+                            <?php else: ?>
+                                <span class="badge bg-secondary">No fingerprints</span>
+                            <?php endif; ?>
+                        </td>
                         <td>
                             <?php if ($student['status'] === 'active'): ?>
                                 <span class="badge bg-success">Active</span>
@@ -194,6 +225,11 @@ while ($row = $result->fetch_assoc()) {
 
                     <div class="alert alert-info" id="statusMessage">
                         <i class="bi bi-info-circle"></i> <span id="statusText">Waiting for scanner...</span>
+                    </div>
+
+                    <div class="alert alert-secondary mt-2" id="debugMessage" style="display:none;">
+                        <strong>Debug Log</strong>
+                        <div id="debugText" style="font-family: monospace; font-size: 0.85rem; white-space: pre-wrap;"></div>
                     </div>
 
                     <div class="d-flex gap-2 justify-content-between">
@@ -360,7 +396,11 @@ let updateState = {
     numFingers: 0,
     currentFinger: 1,
     currentScan: 1,
-    enrolledFingerprints: []
+    enrolledFingerprints: [],
+    registrationId: null,
+    monitorHandle: null,
+    lastServerFinger: 1,
+    debugLines: []
 };
 
 // Initialize modal when page loads
@@ -406,13 +446,43 @@ async function startEnrollment() {
     updateState.currentFinger = 1;
     updateState.currentScan = 1;
     updateState.enrolledFingerprints = [];
+    updateState.lastServerFinger = 1;
+    updateState.registrationId = null;
+    appendDebug('Starting enrollment flow');
     
     updateProgress();
 
     const isOnline = await checkScannerOnline(true);
-    if (isOnline) {
-        simulateScanning();
+    if (!isOnline) {
+        showError('Scanner offline. Retry when scanner is online.');
+        return;
     }
+
+    appendDebug('Scanner online, requesting start_registration');
+    fetch('../api/start_registration.php', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+            student_id: updateState.studentId,
+            total_fingers: updateState.numFingers
+        })
+    })
+    .then(response => response.json())
+    .then(data => {
+        appendDebug('start_registration response', data);
+        if (!data.success) {
+            throw new Error(data.message || 'Failed to start registration');
+        }
+
+        updateState.registrationId = data.registration_id;
+        updateState.lastServerFinger = 1;
+        beginEnrollmentMonitor();
+    })
+    .catch(error => {
+        showError('Connection error: ' + error.message);
+    });
 }
 
 function updateProgress() {
@@ -431,32 +501,50 @@ function updateProgress() {
     }
 }
 
-async function simulateScanning() {
-    const isOnline = await checkScannerOnline(true);
-    if (!isOnline) {
-        return;
+function beginEnrollmentMonitor() {
+    if (updateState.monitorHandle) {
+        clearInterval(updateState.monitorHandle);
     }
 
-    // Show waiting for ESP32 scanner message
-    const statusDiv = document.getElementById('statusMessage');
-    statusDiv.innerHTML = `
-        <div class="d-flex align-items-center">
-            <i class="bi bi-wifi me-2 text-success"></i>
-            <div>
-                <strong>Scanner Online - Waiting for ESP32</strong><br>
-                <small>Finger ${updateState.currentFinger}, Scan ${updateState.currentScan}/5</small><br>
-                <small class="text-muted">Place finger ${updateState.currentFinger} on the fingerprint scanner</small>
-            </div>
-        </div>
-        <div class="mt-3">
-            <button type="button" class="btn btn-sm btn-success" onclick="completeScan()">
-                <i class="bi bi-fingerprint"></i> Simulate Scan (Testing Only)
-            </button>
-            <small class="d-block text-muted mt-1">This button simulates ESP32 sending scan data</small>
-        </div>
-    `;
-    
-    // Don't auto-proceed - wait for manual trigger or real ESP32 data
+    showWaitingMessage();
+    appendDebug('Monitoring get_mode for registration progress');
+
+    updateState.monitorHandle = setInterval(async () => {
+        try {
+            const response = await fetch('../api/get_mode.php');
+            const data = await response.json();
+
+            if (!data.success) {
+                appendDebug('get_mode returned unsuccessful response', data);
+                return;
+            }
+
+            if (data.mode === 'registration' && String(data.registration_id || '') === String(updateState.registrationId || '')) {
+                const serverFinger = Math.max(1, parseInt(data.finger_number || 1, 10));
+                if (serverFinger > updateState.lastServerFinger) {
+                    while (updateState.lastServerFinger < serverFinger && updateState.lastServerFinger <= updateState.numFingers) {
+                        markFingerCompleted(updateState.lastServerFinger);
+                        updateState.lastServerFinger++;
+                    }
+                }
+
+                updateState.currentFinger = Math.min(serverFinger, updateState.numFingers);
+                updateProgress();
+                showWaitingMessage();
+                return;
+            }
+
+            if (data.mode === 'attendance' && updateState.registrationId) {
+                if (updateState.lastServerFinger <= updateState.numFingers) {
+                    markFingerCompleted(updateState.lastServerFinger);
+                }
+                appendDebug('Registration completed. Mode switched to attendance.');
+                showCompletion();
+            }
+        } catch (error) {
+            appendDebug('get_mode error: ' + error.message);
+        }
+    }, 2000);
 }
 
 async function checkScannerOnline(showStatus = false) {
@@ -479,12 +567,14 @@ async function checkScannerOnline(showStatus = false) {
                             <small>${(data.scanner && data.scanner.message) ? data.scanner.message : 'No recent heartbeat from scanner'}</small>
                         </div>
                     </div>
-                    <button type="button" class="btn btn-sm btn-outline-danger" onclick="simulateScanning()">
+                    <button type="button" class="btn btn-sm btn-outline-danger" onclick="startEnrollment()">
                         <i class="bi bi-arrow-clockwise"></i> Retry Check
                     </button>
                 </div>
             `;
         }
+
+        appendDebug('scanner_status online=' + String(isOnline), data);
 
         return isOnline;
     } catch (error) {
@@ -501,59 +591,79 @@ async function checkScannerOnline(showStatus = false) {
                             <small>Status check failed. Verify scanner and server connection.</small>
                         </div>
                     </div>
-                    <button type="button" class="btn btn-sm btn-outline-danger" onclick="simulateScanning()">
+                    <button type="button" class="btn btn-sm btn-outline-danger" onclick="startEnrollment()">
                         <i class="bi bi-arrow-clockwise"></i> Retry Check
                     </button>
                 </div>
             `;
         }
 
+        appendDebug('scanner_status error: ' + error.message);
+
         return false;
     }
 }
 
-function completeScan() {
-    const currentCircle = document.getElementById(`scan${updateState.currentScan}`);
-    if (currentCircle) {
-        currentCircle.classList.remove('scanning');
-        currentCircle.classList.add('success');
-        currentCircle.innerHTML = '<i class="bi bi-check"></i>';
-    }
-    
-    updateState.currentScan++;
-    
-    if (updateState.currentScan <= 5) {
-        // Continue with next scan for same finger
-        setTimeout(() => {
-            updateProgress();
-            simulateScanning();
-        }, 1000);
-    } else {
-        // Finger complete
-        updateState.enrolledFingerprints.push({
-            finger: updateState.currentFinger,
-            scans: 5
-        });
-        
-        document.getElementById('statusText').textContent = 
-            `Finger ${updateState.currentFinger} completed successfully!`;
-        
-        setTimeout(() => {
-            if (updateState.currentFinger < updateState.numFingers) {
-                // Move to next finger
-                updateState.currentFinger++;
-                updateState.currentScan = 1;
-                updateProgress();
-                simulateScanning();
-            } else {
-                // All fingers complete
-                showCompletion();
-            }
-        }, 1500);
+function showWaitingMessage() {
+    const statusText = document.getElementById('statusText');
+    if (statusText) {
+        statusText.textContent = `Waiting for scanner save (finger ${updateState.currentFinger} of ${updateState.numFingers})`;
     }
 }
 
+function showError(message) {
+    const statusDiv = document.getElementById('statusMessage');
+    statusDiv.className = 'alert alert-danger';
+    statusDiv.innerHTML = `<i class="bi bi-exclamation-triangle"></i> ${message}`;
+    appendDebug(message);
+}
+
+function markFingerCompleted(fingerNo) {
+    if (!updateState.enrolledFingerprints.find(f => f.finger === fingerNo)) {
+        updateState.enrolledFingerprints.push({ finger: fingerNo, scans: 1 });
+    }
+
+    document.querySelectorAll('.scan-circle').forEach(circle => {
+        circle.classList.remove('scanning', 'error');
+        circle.classList.add('success');
+        circle.innerHTML = '<i class="bi bi-check"></i>';
+    });
+
+    appendDebug('Finger ' + String(fingerNo) + ' completed by scanner');
+}
+
+function appendDebug(message, data) {
+    const debugBox = document.getElementById('debugMessage');
+    const debugText = document.getElementById('debugText');
+    if (!debugBox || !debugText) {
+        return;
+    }
+
+    const ts = new Date().toLocaleTimeString();
+    let line = `[${ts}] ${message}`;
+    if (typeof data !== 'undefined') {
+        try {
+            line += `\n${JSON.stringify(data)}`;
+        } catch (e) {
+            line += `\n${String(data)}`;
+        }
+    }
+
+    updateState.debugLines.push(line);
+    if (updateState.debugLines.length > 12) {
+        updateState.debugLines = updateState.debugLines.slice(-12);
+    }
+
+    debugText.textContent = updateState.debugLines.join('\n\n');
+    debugBox.style.display = 'block';
+}
+
 function showCompletion() {
+    if (updateState.monitorHandle) {
+        clearInterval(updateState.monitorHandle);
+        updateState.monitorHandle = null;
+    }
+
     document.getElementById('step2EnrollmentProgress').style.display = 'none';
     document.getElementById('step3Complete').style.display = 'block';
     
@@ -562,6 +672,11 @@ function showCompletion() {
 }
 
 function resetModal() {
+    if (updateState.monitorHandle) {
+        clearInterval(updateState.monitorHandle);
+        updateState.monitorHandle = null;
+    }
+
     document.getElementById('step1SelectFingers').style.display = 'block';
     document.getElementById('step2EnrollmentProgress').style.display = 'none';
     document.getElementById('step3Complete').style.display = 'none';
@@ -577,6 +692,18 @@ function resetModal() {
     updateState.currentScan = 1;
     updateState.enrolledFingerprints = [];
     updateState.scannerOnline = false;
+    updateState.registrationId = null;
+    updateState.lastServerFinger = 1;
+    updateState.debugLines = [];
+
+    const debugBox = document.getElementById('debugMessage');
+    const debugText = document.getElementById('debugText');
+    if (debugBox) {
+        debugBox.style.display = 'none';
+    }
+    if (debugText) {
+        debugText.textContent = '';
+    }
 }
 </script>
 

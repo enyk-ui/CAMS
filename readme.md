@@ -148,12 +148,10 @@ White:             #ffffff (cards, content)
 
 | Endpoint | Method | Purpose |
 |----------|--------|---------|
-| `/api/scan.php` | POST | Record attendance from ESP8266 |
-| `/api/register.php` | POST | Register new student |
-| `/api/enroll.php` | POST | Fingerprint enrollment workflow |
-| `/api/get_recent_scans.php` | GET | Dashboard live updates |
-| `/api/test.php` | GET/POST | Test scanner API |
-| `/api/queue.php` | GET | Process email queue (cron) |
+| `/api/device-command.php` | GET | ESP8266 polls next command |
+| `/api/enroll-result.php` | POST | Save enrolled finger result |
+| `/api/attendance.php` | POST | Record IN/OUT scan |
+| `/api/reset-command.php` | GET | Queue IDLE reset command |
 
 ## Email System
 
@@ -172,11 +170,11 @@ Setup cron (Linux/Mac):
 
 - **admins** - Admin user accounts (id, email, password_hash, full_name, status)
 - **teachers** - Teacher user accounts (id, email, password_hash, full_name, section, status)
-- **students** - Student records (id, student_id, name, email, year, section)
-- **fingerprints** - Stored fingerprints (student_id, finger_index, sensor_id)
-- **attendance** - Daily records (student_id, date, times, status)
-- **settings** - System configuration (late_threshold, schedules, etc.)
-- **notification_queue** - Email retry queue (pending, sent, failed)
+- **users** - User records for scanner mapping
+- **fingerprints** - Fingerprint slots per user
+- **attendance_logs** - IN/OUT scan events
+- **devices** - Scanner devices
+- **device_commands** - Pending scanner commands
 
 ## Default Credentials
 

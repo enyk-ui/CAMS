@@ -63,14 +63,21 @@ $years = [1, 2, 3, 4];
                             </div>
                             <div class="col-md-6">
                                 <label for="section" class="form-label">Section</label>
-                                <input type="text" class="form-control" id="section" required>
+                                <select class="form-select" id="section" required>
+                                    <option value="">Select section</option>
+                                    <option value="Alpha">Alpha</option>
+                                    <option value="Beta">Beta</option>
+                                    <option value="Charlie">Charlie</option>
+                                    <option value="Delta">Delta</option>
+                                    <option value="Echo">Echo</option>
+                                </select>
                             </div>
                         </div>
 
                         <hr>
                         <div class="d-flex justify-content-end">
                             <button type="submit" class="btn btn-primary" id="registerStudentBtn">
-                                <i class="bi bi-save"></i> Continue Fingerprint Registration
+                                <i class="bi bi-save"></i> Register Fingerprints
                             </button>
                         </div>
                     </form>
@@ -109,16 +116,17 @@ $years = [1, 2, 3, 4];
 
                 <div id="step2EnrollmentProgress" style="display:none;">
                     <div class="text-center mb-4">
-                        <h4 id="currentFingerTitle">Enrolling Finger 1 of 1</h4>
+                        <h4 id="currentFingerTitle">Finger 1 of 1</h4>
                         <p class="text-muted mb-0">Place your finger on the scanner and wait for confirmation.</p>
                     </div>
 
-                    <div class="d-flex justify-content-center gap-3 flex-wrap mb-4">
-                        <div class="scan-circle" id="scan1"><i class="bi bi-fingerprint"></i></div>
-                        <div class="scan-circle" id="scan2"><i class="bi bi-fingerprint"></i></div>
-                        <div class="scan-circle" id="scan3"><i class="bi bi-fingerprint"></i></div>
-                        <div class="scan-circle" id="scan4"><i class="bi bi-fingerprint"></i></div>
-                        <div class="scan-circle" id="scan5"><i class="bi bi-fingerprint"></i></div>
+                    <div class="d-flex justify-content-center gap-3 flex-wrap mb-4" id="scanCirclesContainer"></div>
+
+                    <div class="mb-3">
+                        <div class="progress" style="height: 10px;">
+                            <div id="enrollProgressBar" class="progress-bar bg-success" role="progressbar" style="width: 0%"></div>
+                        </div>
+                        <small class="text-muted" id="enrollProgressText">Progress: 0%</small>
                     </div>
 
                     <div class="alert alert-info mb-4" id="statusMessage">
@@ -126,9 +134,14 @@ $years = [1, 2, 3, 4];
                             <div class="spinner-border spinner-border-sm me-2" role="status"></div>
                             <div>
                                 <strong>Waiting for scanner</strong><br>
-                                <small id="statusText">Initializing enrollment...</small>
+                                <small id="statusText">Waiting for scan...</small>
                             </div>
                         </div>
+                    </div>
+
+                    <div class="alert alert-secondary mb-4" id="debugMessage" style="display:none;">
+                        <strong>Debug Log</strong>
+                        <div id="debugText" style="font-family: monospace; font-size: 0.85rem; white-space: pre-wrap;"></div>
                     </div>
 
                     <div class="d-flex justify-content-between">
@@ -144,9 +157,20 @@ $years = [1, 2, 3, 4];
                 <div id="step3Complete" style="display:none;">
                     <div class="text-center py-4">
                         <i class="bi bi-check-circle-fill text-success" style="font-size:4rem;"></i>
-                        <h4 class="text-success mt-3">Enrollment Complete</h4>
+                        <h4 class="text-success mt-3">Fingerprint Enrollment Complete</h4>
                         <p class="text-muted" id="completionMessage">Fingerprints enrolled successfully.</p>
-                        <button type="button" class="btn btn-primary mt-3" data-bs-dismiss="modal">Done</button>
+                        <div class="alert alert-warning text-start mt-3" id="savePromptBox">
+                            <strong>Save student now?</strong><br>
+                            <small>If you retry, the enrolled fingerprints for this session will be removed from scanner and enrollment restarts.</small>
+                        </div>
+                        <div class="d-flex justify-content-center gap-2 mt-3 flex-wrap">
+                            <button type="button" class="btn btn-outline-danger" id="btnRetryEnrollment">
+                                <i class="bi bi-arrow-clockwise"></i> Retry Enrollment
+                            </button>
+                            <button type="button" class="btn btn-primary" id="btnSaveStudent">
+                                <i class="bi bi-check2-circle"></i> Save Student
+                            </button>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -161,19 +185,27 @@ let updateState = {
     studentName: '',
     numFingers: 0,
     currentFinger: 1,
-    currentScan: 1,
     enrolledFingerprints: [],
     registrationId: null,
     monitorHandle: null,
     lastServerFinger: 1,
     enrollmentCompleted: false,
     studentCreatedInSession: false,
-    rollbackInProgress: false
+    rollbackInProgress: false,
+    debugLines: [],
+    pollFailures: 0,
+    pendingStudentData: null,
+    studentFinalized: false,
+    isSavingStudent: false,
+    scanStepsPerFinger: 3,
+    currentScanStep: 1,
+    lastProgressSnapshot: ''
 };
 
 document.addEventListener('DOMContentLoaded', function () {
     updateState.modal = new bootstrap.Modal(document.getElementById('fingerprintModal'));
     updateModeIndicator('attendance');
+    renderScanCircles(1);
 
     const form = document.getElementById('registrationForm');
     if (form) {
@@ -196,6 +228,16 @@ document.addEventListener('DOMContentLoaded', function () {
         updateState.modal.hide();
     });
 
+    const saveBtn = document.getElementById('btnSaveStudent');
+    if (saveBtn) {
+        saveBtn.addEventListener('click', saveStudentRecord);
+    }
+
+    const retryEnrollmentBtn = document.getElementById('btnRetryEnrollment');
+    if (retryEnrollmentBtn) {
+        retryEnrollmentBtn.addEventListener('click', retryEnrollment);
+    }
+
     document.getElementById('fingerprintModal').addEventListener('shown.bs.modal', function () {
         setScannerMode('registration');
         updateModeIndicator('registration');
@@ -205,19 +247,36 @@ document.addEventListener('DOMContentLoaded', function () {
         setScannerMode('attendance');
         updateModeIndicator('attendance');
 
-        if (updateState.studentCreatedInSession && !updateState.enrollmentCompleted && updateState.studentId && !updateState.rollbackInProgress) {
+        if (updateState.studentCreatedInSession && !updateState.studentFinalized && updateState.studentId && !updateState.rollbackInProgress) {
             rollbackIncompleteRegistration();
         }
 
         if (updateState.enrollmentCompleted) {
-            showAlert('success', 'Student registration completed with fingerprint enrollment.');
-            document.getElementById('registrationForm').reset();
-            updateState.studentCreatedInSession = false;
-            updateState.studentId = null;
-            updateState.studentName = '';
+            if (updateState.studentFinalized) {
+                showAlert('success', 'Student registration completed with fingerprint enrollment.');
+                updateState.studentCreatedInSession = false;
+                updateState.studentId = null;
+                updateState.studentName = '';
+                updateState.pendingStudentData = null;
+            }
         }
 
         resetModal();
+    });
+
+    window.addEventListener('beforeunload', function () {
+        if (!updateState.studentCreatedInSession || updateState.enrollmentCompleted || !updateState.studentId || updateState.rollbackInProgress) {
+            return;
+        }
+
+        try {
+            const payload = new URLSearchParams({
+                student_id: String(updateState.studentId)
+            });
+            navigator.sendBeacon('../api/rollback_registration.php', payload);
+        } catch (e) {
+            // Best-effort cleanup only.
+        }
     });
 });
 
@@ -271,11 +330,13 @@ function submitRegistration(e) {
 
             updateState.studentId = data.student_id;
             updateState.studentName = studentData.first_name + ' ' + studentData.last_name;
+            updateState.pendingStudentData = studentData;
             updateState.studentCreatedInSession = true;
             updateState.enrollmentCompleted = false;
+            updateState.studentFinalized = false;
             document.getElementById('studentName').textContent = updateState.studentName;
 
-            showAlert('warning', 'Student record is temporary until fingerprint enrollment is completed.');
+            showAlert('warning', 'Temporary enrollment session started. Student info will be saved only after fingerprint enrollment completes.');
             updateState.modal.show();
         })
         .catch(error => {
@@ -283,17 +344,45 @@ function submitRegistration(e) {
         })
         .finally(() => {
             submitBtn.disabled = false;
-            submitBtn.innerHTML = '<i class="bi bi-save"></i> Continue Fingerprint Registration';
+            submitBtn.innerHTML = '<i class="bi bi-save"></i> Register Fingerprints';
         });
 }
 
 function registerStudent(studentData) {
+    const payload = {
+        ...studentData,
+        defer_save: true
+    };
+
     return fetch('../api/register.php', {
         method: 'POST',
         headers: {
             'Content-Type': 'application/json'
         },
-        body: JSON.stringify(studentData)
+        body: JSON.stringify(payload)
+    }).then(response => response.json());
+}
+
+function finalizeStudentRegistration() {
+    if (!updateState.pendingStudentData || !updateState.studentId) {
+        return Promise.reject(new Error('Missing temporary registration data'));
+    }
+
+    const payload = {
+        student_id: updateState.studentId,
+        student_no: updateState.pendingStudentData.student_id,
+        first_name: updateState.pendingStudentData.first_name,
+        middle_initial: updateState.pendingStudentData.middle_initial || '',
+        last_name: updateState.pendingStudentData.last_name,
+        email: updateState.pendingStudentData.email
+    };
+
+    return fetch('../api/finalize_registration.php', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(payload)
     }).then(response => response.json());
 }
 
@@ -317,12 +406,28 @@ function updateModeIndicator(mode) {
 
     if (mode === 'registration') {
         badge.className = 'badge bg-warning text-dark me-2';
-        badge.textContent = 'Mode: Registration (Busy)';
+        badge.textContent = 'Mode: Registration (Waiting Finger)';
         return;
     }
 
     badge.className = 'badge bg-success me-2';
     badge.textContent = 'Mode: Attendance';
+}
+
+function renderScanCircles(totalFingers) {
+    const container = document.getElementById('scanCirclesContainer');
+    if (!container) {
+        return;
+    }
+
+    const safeTotal = Math.max(1, parseInt(totalFingers || 1, 10));
+    let html = '';
+
+    for (let i = 1; i <= safeTotal; i++) {
+        html += `<div class="scan-circle" id="scan${i}" data-finger="${i}"><i class="bi bi-fingerprint"></i></div>`;
+    }
+
+    container.innerHTML = html;
 }
 
 async function startEnrollment() {
@@ -340,18 +445,17 @@ async function startEnrollment() {
     document.getElementById('step3Complete').style.display = 'none';
 
     updateState.currentFinger = 1;
-    updateState.currentScan = 1;
     updateState.enrolledFingerprints = [];
     updateState.enrollmentCompleted = false;
+    updateState.pollFailures = 0;
+    appendDebug('Starting enrollment for student_id=' + String(updateState.studentId));
+
+    renderScanCircles(updateState.numFingers);
 
     updateProgress();
 
-    const isOnline = await checkScannerOnline(true);
-    if (!isOnline) {
-        showWaitingMessage('Scanner heartbeat is stale. Starting registration mode anyway...');
-    }
-
-    showWaitingMessage('Starting registration mode...');
+    showWaitingMessage('Sending registration command to scanner...');
+    appendDebug('Calling start_registration API');
 
     fetch('../api/start_registration.php', {
         method: 'POST',
@@ -365,12 +469,17 @@ async function startEnrollment() {
     })
     .then(response => response.json())
     .then(data => {
+        appendDebug('start_registration response', data);
         if (!data.success) {
             throw new Error(data.message || 'Failed to start registration');
         }
 
         updateState.registrationId = data.registration_id;
-        updateState.lastServerFinger = 1;
+        updateState.lastServerFinger = Math.max(1, parseInt(data.finger_number || 1, 10));
+        if (data.total_fingers) {
+            updateState.numFingers = Math.max(1, parseInt(data.total_fingers, 10));
+        }
+        showWaitingMessage('Command queued. Place your finger on the scanner.');
         beginEnrollmentMonitor();
     })
     .catch(error => {
@@ -383,110 +492,156 @@ function beginEnrollmentMonitor() {
         clearInterval(updateState.monitorHandle);
     }
 
-    showWaitingMessage('Waiting for scan...');
+    showWaitingMessage('Waiting for scanner to process enrollment command...');
+    appendDebug('Polling get_mode for registration progress');
 
     updateState.monitorHandle = setInterval(async () => {
         try {
-            const response = await fetch('../api/get_mode.php');
+            const response = await fetch(`../api/get_mode.php?registration_id=${encodeURIComponent(String(updateState.registrationId || ''))}`);
             const data = await response.json();
 
             if (!data.success) {
+                updateState.pollFailures += 1;
+                if (updateState.pollFailures >= 3) {
+                    showError('Unable to read scanner mode. Check server connection and try again.');
+                }
                 return;
             }
 
-            if (data.mode === 'registration' && String(data.registration_id || '') === String(updateState.registrationId || '')) {
+            updateState.pollFailures = 0;
+
+            if (data.total_fingers) {
+                updateState.numFingers = Math.max(1, parseInt(data.total_fingers, 10));
+            }
+
+            if (data.registration_id) {
+                const activeRegistrationId = String(data.registration_id);
+                if (activeRegistrationId !== String(updateState.registrationId || '')) {
+                    appendDebug('Active registration command changed to id=' + activeRegistrationId);
+                    updateState.registrationId = activeRegistrationId;
+                }
+            }
+
+            if (data.mode === 'registration') {
                 const serverFinger = Math.max(1, parseInt(data.finger_number || 1, 10));
+                const serverScanStep = parseInt(data.scan_step || 0, 10);
+                const totalScanSteps = parseInt(data.total_scan_steps || 3, 10);
+
+                const snapshot = `${String(data.mode)}:${serverFinger}:${serverScanStep}:${String(data.last_sensor_id || '')}`;
+                if (snapshot !== updateState.lastProgressSnapshot) {
+                    updateState.lastProgressSnapshot = snapshot;
+                    appendDebug('Registration status changed', {
+                        finger_number: serverFinger,
+                        total_fingers: updateState.numFingers,
+                        scan_step: serverScanStep,
+                        total_scan_steps: totalScanSteps,
+                        last_sensor_id: data.last_sensor_id || null
+                    });
+                }
+
                 if (serverFinger > updateState.lastServerFinger) {
                     markFingerCompleted(updateState.lastServerFinger);
                     updateState.lastServerFinger = serverFinger;
+
+                    if (data.last_sensor_id) {
+                        showWaitingMessage(`Registered (ID: ${data.last_sensor_id})`);
+                    }
                 }
 
                 updateState.currentFinger = Math.min(serverFinger, updateState.numFingers);
+                // Update scan step from server (only if > 0, meaning device reported progress)
+                if (serverScanStep > 0) {
+                    updateState.currentScanStep = serverScanStep;
+                    updateState.scanStepsPerFinger = totalScanSteps;
+                }
                 updateProgress();
-                showWaitingMessage();
                 return;
             }
 
             if (data.mode === 'attendance' && updateState.registrationId) {
+                if (updateState.lastServerFinger <= updateState.numFingers) {
+                    markFingerCompleted(updateState.lastServerFinger);
+                }
+                if (data.last_sensor_id) {
+                    showWaitingMessage(`Registered (ID: ${data.last_sensor_id})`);
+                }
+                appendDebug('Mode switched to attendance; registration complete path reached');
                 showCompletion();
             }
         } catch (error) {
+            appendDebug('get_mode poll error: ' + error.message);
             // Keep polling on transient failures.
         }
     }, 2000);
 }
 
 function markFingerCompleted(fingerNo) {
+    if (fingerNo < 1 || fingerNo > updateState.numFingers) {
+        return;
+    }
+
     if (!updateState.enrolledFingerprints.find(f => f.finger === fingerNo)) {
         updateState.enrolledFingerprints.push({ finger: fingerNo, scans: 1 });
     }
 
-    document.querySelectorAll('.scan-circle').forEach(circle => {
+    const circle = document.getElementById(`scan${fingerNo}`);
+    if (circle) {
         circle.classList.remove('scanning', 'error');
         circle.classList.add('success');
-    });
+        circle.innerHTML = '<i class="bi bi-check-lg"></i>';
+    }
+
+    const statusText = document.getElementById('statusText');
+    if (statusText) {
+        if (fingerNo >= updateState.numFingers) {
+            statusText.textContent = `Finger ${fingerNo} of ${updateState.numFingers} registered`;
+        } else {
+            statusText.textContent = `Finger ${fingerNo} registered. Place finger ${fingerNo + 1} of ${updateState.numFingers}.`;
+        }
+    }
+
+    updateOverallProgress();
 }
 
 function updateProgress() {
     document.getElementById('currentFingerTitle').textContent =
-        `Enrolling Finger ${updateState.currentFinger} of ${updateState.numFingers}`;
+        `Finger ${updateState.currentFinger} of ${updateState.numFingers}`;
 
     document.querySelectorAll('.scan-circle').forEach(circle => {
-        circle.classList.remove('scanning', 'success', 'error');
+        if (!circle.classList.contains('success')) {
+            circle.classList.remove('scanning', 'error');
+            circle.innerHTML = '<i class="bi bi-fingerprint"></i>';
+        }
     });
 
-    const currentCircle = document.getElementById(`scan${updateState.currentScan}`);
-    if (currentCircle) {
+    const currentCircle = document.getElementById(`scan${updateState.currentFinger}`);
+    if (currentCircle && !currentCircle.classList.contains('success')) {
         currentCircle.classList.add('scanning');
     }
+
+    const statusText = document.getElementById('statusText');
+    if (statusText) {
+        statusText.textContent = `Scanning finger ${updateState.currentFinger} ${updateState.currentScanStep} of ${updateState.scanStepsPerFinger}`;
+    }
+
+    updateOverallProgress();
 }
 
-async function checkScannerOnline(showStatus = false) {
-    const statusDiv = document.getElementById('statusMessage');
+function updateOverallProgress() {
+    const progressBar = document.getElementById('enrollProgressBar');
+    const progressText = document.getElementById('enrollProgressText');
 
-    try {
-        const response = await fetch('../api/scanner_status.php');
-        const data = await response.json();
-        const isOnline = !!(response.ok && data.success && data.scanner && data.scanner.online);
-
-        if (showStatus && !isOnline) {
-            statusDiv.innerHTML = `
-                <div class="d-flex align-items-center justify-content-between gap-2 flex-wrap">
-                    <div class="d-flex align-items-center">
-                        <i class="bi bi-wifi-off me-2"></i>
-                        <div>
-                            <strong>Scanner Offline</strong><br>
-                            <small>${(data.scanner && data.scanner.message) ? data.scanner.message : 'No recent heartbeat from scanner'}</small>
-                        </div>
-                    </div>
-                    <button type="button" class="btn btn-sm btn-outline-danger" onclick="startEnrollment()">
-                        <i class="bi bi-arrow-clockwise me-1"></i>Retry Check
-                    </button>
-                </div>
-            `;
-        }
-
-        return isOnline;
-    } catch (error) {
-        if (showStatus) {
-            statusDiv.innerHTML = `
-                <div class="d-flex align-items-center justify-content-between gap-2 flex-wrap">
-                    <div class="d-flex align-items-center">
-                        <i class="bi bi-wifi-off me-2"></i>
-                        <div>
-                            <strong>Scanner Offline</strong><br>
-                            <small>Status check failed. Verify scanner and server connection.</small>
-                        </div>
-                    </div>
-                    <button type="button" class="btn btn-sm btn-outline-danger" onclick="startEnrollment()">
-                        <i class="bi bi-arrow-clockwise me-1"></i>Retry Check
-                    </button>
-                </div>
-            `;
-        }
-
-        return false;
+    if (!progressBar || !progressText) {
+        return;
     }
+
+    const completed = updateState.enrolledFingerprints.length;
+    const total = Math.max(1, updateState.numFingers || 1);
+    const percent = Math.round((completed / total) * 100);
+
+    progressBar.style.width = `${percent}%`;
+    progressBar.setAttribute('aria-valuenow', String(percent));
+    progressText.textContent = `Progress: ${completed}/${total} fingers (${percent}%)`;
 }
 
 function showWaitingMessage(message) {
@@ -494,7 +649,7 @@ function showWaitingMessage(message) {
     const statusText = document.getElementById('statusText');
 
     if (statusText) {
-        statusText.textContent = message || `Enroll finger ${updateState.currentFinger} of ${updateState.numFingers}`;
+        statusText.textContent = message || 'Waiting for scan...';
     }
 
     if (statusDiv) {
@@ -515,9 +670,10 @@ function showError(message) {
             </button>
         </div>
     `;
+    appendDebug('ERROR: ' + message);
 }
 
-function showCompletion() {
+async function showCompletion() {
     if (updateState.monitorHandle) {
         clearInterval(updateState.monitorHandle);
         updateState.monitorHandle = null;
@@ -526,9 +682,90 @@ function showCompletion() {
     document.getElementById('step2EnrollmentProgress').style.display = 'none';
     document.getElementById('step3Complete').style.display = 'block';
     document.getElementById('completionMessage').textContent =
-        `${updateState.numFingers} fingerprint(s) enrolled successfully for ${updateState.studentName}.`;
+        `${updateState.numFingers} fingerprint(s) enrolled successfully for ${updateState.studentName}. Confirm to save student data.`;
 
     updateState.enrollmentCompleted = true;
+    updateState.studentFinalized = false;
+    appendDebug('Enrollment marked complete');
+}
+
+async function saveStudentRecord() {
+    if (updateState.isSavingStudent || updateState.studentFinalized) {
+        return;
+    }
+
+    updateState.isSavingStudent = true;
+    const saveBtn = document.getElementById('btnSaveStudent');
+    if (saveBtn) {
+        saveBtn.disabled = true;
+        saveBtn.innerHTML = '<i class="bi bi-arrow-repeat spin"></i> Saving...';
+    }
+
+    try {
+        const finalizeResult = await finalizeStudentRegistration();
+        appendDebug('finalize_registration response', finalizeResult);
+        if (!finalizeResult.success) {
+            throw new Error(finalizeResult.message || 'Failed to finalize student record');
+        }
+
+        updateState.studentFinalized = true;
+        updateState.studentCreatedInSession = false;
+        showAlert('success', 'Student data saved successfully.');
+        updateState.modal.hide();
+    } catch (error) {
+        showAlert('danger', 'Failed to save student data: ' + error.message);
+        appendDebug('Save student failed: ' + error.message);
+    } finally {
+        updateState.isSavingStudent = false;
+        if (saveBtn) {
+            saveBtn.disabled = false;
+            saveBtn.innerHTML = '<i class="bi bi-check2-circle"></i> Save Student';
+        }
+    }
+}
+
+async function retryEnrollment() {
+    if (!updateState.studentId) {
+        showAlert('danger', 'No registration session found to retry.');
+        return;
+    }
+
+    try {
+        const response = await fetch('../api/retry_registration.php', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                student_id: updateState.studentId,
+                total_fingers: updateState.numFingers
+            })
+        });
+        const data = await response.json();
+        appendDebug('retry_registration response', data);
+
+        if (!data.success) {
+            throw new Error(data.message || 'Retry failed');
+        }
+
+        document.getElementById('step3Complete').style.display = 'none';
+        document.getElementById('step2EnrollmentProgress').style.display = 'block';
+
+        updateState.currentFinger = 1;
+        updateState.lastServerFinger = 1;
+        updateState.enrolledFingerprints = [];
+        updateState.enrollmentCompleted = false;
+        updateState.studentFinalized = false;
+        updateState.currentScanStep = 1;
+        updateState.lastProgressSnapshot = '';
+
+        renderScanCircles(updateState.numFingers);
+        updateProgress();
+        showWaitingMessage('Retry queued. Scanner will clear previous fingerprints and start scanning again.');
+        beginEnrollmentMonitor();
+    } catch (error) {
+        showAlert('danger', 'Retry failed: ' + error.message);
+    }
 }
 
 function rollbackIncompleteRegistration() {
@@ -546,11 +783,12 @@ function rollbackIncompleteRegistration() {
     .then(response => response.json())
     .then(data => {
         if (data.success) {
-            showAlert('warning', 'Registration canceled: student record was removed because fingerprint enrollment was not completed.');
-            document.getElementById('registrationForm').reset();
+            showAlert('warning', 'Enrollment session canceled. Student form values are kept; restart fingerprint enrollment when ready.');
             updateState.studentCreatedInSession = false;
             updateState.studentId = null;
             updateState.studentName = '';
+            updateState.pendingStudentData = null;
+            updateState.studentFinalized = false;
         } else {
             showAlert('danger', data.message || 'Failed to rollback incomplete registration');
         }
@@ -573,19 +811,60 @@ function resetModal() {
     document.getElementById('step3Complete').style.display = 'none';
 
     document.querySelectorAll('.finger-btn').forEach(b => b.classList.remove('selected'));
-    document.querySelectorAll('.scan-circle').forEach(circle => {
-        circle.classList.remove('scanning', 'success', 'error');
-        circle.innerHTML = '<i class="bi bi-fingerprint"></i>';
-    });
+    renderScanCircles(1);
 
     updateState.numFingers = 0;
     updateState.currentFinger = 1;
-    updateState.currentScan = 1;
     updateState.enrolledFingerprints = [];
     updateState.registrationId = null;
     updateState.monitorHandle = null;
     updateState.lastServerFinger = 1;
     updateState.enrollmentCompleted = false;
+    updateState.debugLines = [];
+    updateState.pollFailures = 0;
+    updateState.pendingStudentData = null;
+    updateState.studentFinalized = false;
+    updateState.isSavingStudent = false;
+    updateState.currentScanStep = 1;
+    updateState.lastProgressSnapshot = '';
+
+    updateOverallProgress();
+
+    const debugBox = document.getElementById('debugMessage');
+    const debugText = document.getElementById('debugText');
+    if (debugBox) {
+        debugBox.style.display = 'none';
+    }
+    if (debugText) {
+        debugText.textContent = '';
+    }
+}
+
+function appendDebug(message, data) {
+    const debugBox = document.getElementById('debugMessage');
+    const debugText = document.getElementById('debugText');
+    if (!debugBox || !debugText) {
+        return;
+    }
+
+    const ts = new Date().toLocaleTimeString();
+    let line = `[${ts}] ${message}`;
+
+    if (typeof data !== 'undefined') {
+        try {
+            line += `\n${JSON.stringify(data)}`;
+        } catch (e) {
+            line += `\n${String(data)}`;
+        }
+    }
+
+    updateState.debugLines.push(line);
+    if (updateState.debugLines.length > 4) {
+        updateState.debugLines = updateState.debugLines.slice(-4);
+    }
+
+    debugText.textContent = updateState.debugLines.join('\n\n');
+    debugBox.style.display = 'block';
 }
 
 function showValidationError(message) {

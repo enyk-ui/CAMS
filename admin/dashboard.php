@@ -115,9 +115,9 @@ $chart_absent = json_encode($absent_data);
                 <div class="d-flex justify-content-between align-items-start">
                     <div>
                         <p class="stat-label">Present Today</p>
-                        <h3 class="stat-number" style="color: #28a745;"><?php echo $stats['present']; ?></h3>
+                        <h3 class="stat-number" style="color: #000000;"><?php echo $stats['present']; ?></h3>
                     </div>
-                    <i class="bi bi-check-circle stat-icon" style="color: #28a745;"></i>
+                    <i class="bi bi-check-circle stat-icon" style="color: #ff0000;"></i>
                 </div>
             </div>
         </div>
@@ -129,9 +129,9 @@ $chart_absent = json_encode($absent_data);
                 <div class="d-flex justify-content-between align-items-start">
                     <div>
                         <p class="stat-label">Late Today</p>
-                        <h3 class="stat-number" style="color: #ffc107;"><?php echo $stats['late']; ?></h3>
+                        <h3 class="stat-number" style="color: #ff0000;"><?php echo $stats['late']; ?></h3>
                     </div>
-                    <i class="bi bi-exclamation-circle stat-icon" style="color: #ffc107;"></i>
+                    <i class="bi bi-exclamation-circle stat-icon" style="color: #000000;"></i>
                 </div>
             </div>
         </div>
@@ -143,9 +143,9 @@ $chart_absent = json_encode($absent_data);
                 <div class="d-flex justify-content-between align-items-start">
                     <div>
                         <p class="stat-label">Absent Today</p>
-                        <h3 class="stat-number" style="color: #dc3545;"><?php echo $stats['absent']; ?></h3>
+                        <h3 class="stat-number" style="color: #000000;"><?php echo $stats['absent']; ?></h3>
                     </div>
-                    <i class="bi bi-x-circle stat-icon" style="color: #dc3545;"></i>
+                    <i class="bi bi-x-circle stat-icon" style="color: #ff0000;"></i>
                 </div>
             </div>
         </div>
@@ -182,7 +182,7 @@ $chart_absent = json_encode($absent_data);
     <div class="card-header d-flex justify-content-between align-items-center">
         <h5 class="mb-0"><i class="bi bi-clock-history"></i> Recent Scans (Auto-refreshing)</h5>
         <span class="badge bg-info">Live <span class="blink"
-                style="display:inline-block; width:8px; height:8px; background:white; border-radius:50%; animation:blink 1s infinite;"></span></span>
+            style="display:inline-block; width:8px; height:8px; background:#ff0000; border-radius:50%; animation:blink 1s infinite;"></span></span>
     </div>
     <div class="card-body">
         <div class="table-responsive">
@@ -339,8 +339,8 @@ new Chart(ctx, {
         datasets: [{
                 label: 'Present',
                 data: <?php echo $chart_present; ?>,
-                borderColor: '#28a745',
-                backgroundColor: 'rgba(40, 167, 69, 0.1)',
+                borderColor: '#000000',
+                backgroundColor: 'rgba(0, 0, 0, 0.08)',
                 borderWidth: 2,
                 tension: 0.4,
                 fill: true
@@ -348,8 +348,8 @@ new Chart(ctx, {
             {
                 label: 'Late',
                 data: <?php echo $chart_late; ?>,
-                borderColor: '#ffc107',
-                backgroundColor: 'rgba(255, 193, 7, 0.1)',
+                borderColor: '#ff0000',
+                backgroundColor: 'rgba(255, 0, 0, 0.08)',
                 borderWidth: 2,
                 tension: 0.4,
                 fill: true
@@ -357,8 +357,9 @@ new Chart(ctx, {
             {
                 label: 'Absent',
                 data: <?php echo $chart_absent; ?>,
-                borderColor: '#dc3545',
-                backgroundColor: 'rgba(220, 53, 69, 0.1)',
+                borderColor: '#000000',
+                backgroundColor: 'rgba(255, 255, 255, 0.85)',
+                borderDash: [6, 4],
                 borderWidth: 2,
                 tension: 0.4,
                 fill: true
@@ -396,8 +397,8 @@ new Chart(ctx2, {
         labels: ['Present', 'Late', 'Absent'],
         datasets: [{
             data: [<?php echo $stats['present'] . ', ' . $stats['late'] . ', ' . $stats['absent']; ?>],
-            backgroundColor: ['#28a745', '#ffc107', '#dc3545'],
-            borderColor: 'white',
+            backgroundColor: ['#000000', '#ff0000', '#ffffff'],
+            borderColor: '#000000',
             borderWidth: 2
         }]
     },

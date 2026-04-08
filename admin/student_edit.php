@@ -200,7 +200,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                                     </div>
                                 </div>
                                 <div class="d-flex gap-2">
-                                    <button type="submit" class="btn btn-success">
+                                    <button type="submit" class="btn  btn-success">
                                         <i class="bi bi-check-lg"></i> Update Student
                                     </button>
                                 </div>
@@ -292,6 +292,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
                     <div class="alert alert-info" id="statusMessage">
                         <i class="bi bi-info-circle"></i> <span id="statusText">Waiting for scanner...</span>
+                    </div>
+
+                    <div class="alert alert-secondary mt-2" id="debugMessage" style="display:none;">
+                        <strong>Debug Log</strong>
+                        <div id="debugText" style="font-family: monospace; font-size: 0.85rem; white-space: pre-wrap;"></div>
                     </div>
 
                     <div class="d-flex gap-2 justify-content-between">
@@ -454,6 +459,7 @@ let updateState = {
     enrolledFingerprints: [],
     fingerprintsChanged: false,
     sessionId: null,
+    debugLines: []
     registrationId: null,
     monitorHandle: null,
     lastServerFinger: 1,
@@ -557,6 +563,7 @@ function startEnrollment() {
     updateState.currentFinger = 1;
     updateState.currentScan = 1;
     updateState.enrolledFingerprints = [];
+    appendDebug('Starting fingerprint update for student_id=' + String(updateState.studentId));
     
     checkScannerOnline(true).then((isOnline) => {
         if (!isOnline) {
@@ -564,6 +571,7 @@ function startEnrollment() {
         }
 
         showWaitingMessage('Starting registration mode...');
+        appendDebug('Calling start_registration API');
         return fetch('../api/start_registration.php', {
             method: 'POST',
             headers: {
@@ -580,6 +588,8 @@ function startEnrollment() {
         if (!data) {
             return;
         }
+
+        appendDebug('start_registration response', data);
 
         if (!data.success) {
             showError('Failed to initialize enrollment: ' + data.message);
@@ -604,11 +614,13 @@ function beginEnrollmentMonitor() {
     }
 
     showWaitingMessage();
+    appendDebug('Polling get_mode for registration progress');
 
     updateState.monitorHandle = setInterval(async () => {
         try {
             const response = await fetch('../api/get_mode.php');
             const data = await response.json();
+            appendDebug('get_mode response', data);
 
             if (!data.success) {
                 return;
@@ -634,9 +646,11 @@ function beginEnrollmentMonitor() {
                 if (updateState.lastServerFinger <= updateState.numFingers) {
                     markFingerCompleted(updateState.lastServerFinger);
                 }
+                appendDebug('Mode switched to attendance; registration complete path reached');
                 showCompletion();
             }
         } catch (e) {
+            appendDebug('get_mode poll error: ' + e.message);
             // Keep polling on transient failures.
         }
     }, 2000);
@@ -677,6 +691,7 @@ async function checkScannerOnline(showStatus = false) {
         const response = await fetch('../api/scanner_status.php');
         const data = await response.json();
         const isOnline = !!(response.ok && data.success && data.scanner && data.scanner.online);
+        appendDebug('scanner_status online=' + String(isOnline), data);
 
         if (showStatus && !isOnline) {
             statusDiv.innerHTML = `
@@ -697,6 +712,7 @@ async function checkScannerOnline(showStatus = false) {
 
         return isOnline;
     } catch (error) {
+        appendDebug('scanner_status error: ' + error.message);
         if (showStatus) {
             statusDiv.innerHTML = `
                 <div class="alert alert-danger mb-0">
@@ -745,6 +761,7 @@ function showError(message) {
             </div>
         </div>
     `;
+    appendDebug('ERROR: ' + message);
 }
 
 function resetModal() {
@@ -772,6 +789,42 @@ function resetModal() {
     updateState.monitorHandle = null;
     updateState.lastServerFinger = 1;
     updateState.enrollmentCompleted = false;
+    updateState.debugLines = [];
+
+    const debugBox = document.getElementById('debugMessage');
+    const debugText = document.getElementById('debugText');
+    if (debugBox) {
+        debugBox.style.display = 'none';
+    }
+    if (debugText) {
+        debugText.textContent = '';
+    }
+}
+
+function appendDebug(message, data) {
+    const debugBox = document.getElementById('debugMessage');
+    const debugText = document.getElementById('debugText');
+    if (!debugBox || !debugText) {
+        return;
+    }
+
+    const ts = new Date().toLocaleTimeString();
+    let line = `[${ts}] ${message}`;
+    if (typeof data !== 'undefined') {
+        try {
+            line += `\n${JSON.stringify(data)}`;
+        } catch (e) {
+            line += `\n${String(data)}`;
+        }
+    }
+
+    updateState.debugLines.push(line);
+    if (updateState.debugLines.length > 15) {
+        updateState.debugLines = updateState.debugLines.slice(-15);
+    }
+
+    debugText.textContent = updateState.debugLines.join('\n\n');
+    debugBox.style.display = 'block';
 }
 
 function validateFormSubmission(e) {

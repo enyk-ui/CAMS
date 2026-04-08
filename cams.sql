@@ -3,7 +3,7 @@
 -- https://www.phpmyadmin.net/
 --
 -- Host: 127.0.0.1
--- Generation Time: Apr 05, 2026 at 05:19 PM
+-- Generation Time: Apr 08, 2026
 -- Server version: 10.4.32-MariaDB
 -- PHP Version: 8.2.12
 
@@ -47,7 +47,71 @@ INSERT INTO `admins` (`id`, `email`, `password`, `full_name`, `status`, `created
 -- --------------------------------------------------------
 
 --
--- Table structure for table `attendance`
+-- Table structure for table `devices`
+--
+
+CREATE TABLE `devices` (
+  `id` int(11) NOT NULL,
+  `device_key` varchar(50) NOT NULL,
+  `name` varchar(100) DEFAULT NULL,
+  `location` varchar(100) DEFAULT NULL,
+  `is_active` tinyint(1) DEFAULT 1,
+  `last_seen` timestamp NULL DEFAULT NULL,
+  `created_at` timestamp NOT NULL DEFAULT current_timestamp()
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
+
+-- --------------------------------------------------------
+
+--
+-- Table structure for table `device_commands`
+--
+
+CREATE TABLE `device_commands` (
+  `id` int(11) NOT NULL,
+  `device_id` int(11) NOT NULL,
+  `mode` enum('IDLE','ENROLL','DELETE') DEFAULT 'IDLE',
+  `user_id` int(11) DEFAULT NULL,
+  `finger_index` tinyint(4) DEFAULT NULL,
+  `sensor_id` int(11) DEFAULT NULL,
+  `status` enum('PENDING','IN_PROGRESS','COMPLETED','FAILED') DEFAULT 'PENDING',
+  `error_message` varchar(255) DEFAULT NULL,
+  `created_at` timestamp NOT NULL DEFAULT current_timestamp(),
+  `updated_at` timestamp NOT NULL DEFAULT current_timestamp() ON UPDATE current_timestamp()
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
+
+-- --------------------------------------------------------
+
+--
+-- Table structure for table `fingerprints`
+--
+
+CREATE TABLE `fingerprints` (
+  `id` int(11) NOT NULL,
+  `user_id` int(11) NOT NULL,
+  `finger_index` tinyint(4) NOT NULL,
+  `sensor_id` int(11) NOT NULL,
+  `device_id` int(11) NOT NULL,
+  `created_at` timestamp NOT NULL DEFAULT current_timestamp()
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
+
+-- --------------------------------------------------------
+
+--
+-- Table structure for table `attendance_logs`
+--
+
+CREATE TABLE `attendance_logs` (
+  `id` int(11) NOT NULL,
+  `user_id` int(11) NOT NULL,
+  `device_id` int(11) NOT NULL,
+  `type` enum('IN','OUT') NOT NULL,
+  `timestamp` timestamp NOT NULL DEFAULT current_timestamp()
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
+
+-- --------------------------------------------------------
+
+--
+-- Table structure for table `attendance` (legacy - for migration)
 --
 
 CREATE TABLE `attendance` (
@@ -78,45 +142,6 @@ CREATE TABLE `daily_attendance_summary` (
 ,`absent_count` decimal(22,0)
 ,`excused_count` decimal(22,0)
 );
-
--- --------------------------------------------------------
-
---
--- Table structure for table `fingerprints`
---
-
-CREATE TABLE `fingerprints` (
-  `id` int(11) NOT NULL,
-  `student_id` int(11) NOT NULL,
-  `finger_index` int(11) NOT NULL,
-  `sensor_id` varchar(255) DEFAULT NULL,
-  `is_active` tinyint(1) DEFAULT 1,
-  `created_at` timestamp NOT NULL DEFAULT current_timestamp()
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
-
--- --------------------------------------------------------
-
---
--- Table structure for table `fingerprint_registrations`
---
-
-CREATE TABLE `fingerprint_registrations` (
-  `id` int(11) NOT NULL,
-  `student_id` int(11) NOT NULL,
-  `finger_number` int(11) NOT NULL DEFAULT 1,
-  `scan_number` int(11) NOT NULL DEFAULT 0,
-  `total_fingers` int(11) NOT NULL DEFAULT 1,
-  `status` enum('active','completed','cancelled') NOT NULL DEFAULT 'active',
-  `created_at` timestamp NOT NULL DEFAULT current_timestamp(),
-  `updated_at` timestamp NOT NULL DEFAULT current_timestamp() ON UPDATE current_timestamp()
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-
---
--- Dumping data for table `fingerprint_registrations`
---
-
-INSERT INTO `fingerprint_registrations` (`id`, `student_id`, `finger_number`, `scan_number`, `total_fingers`, `status`, `created_at`, `updated_at`) VALUES
-(3, 3, 1, 0, 1, 'active', '2026-04-05 10:55:42', '2026-04-05 10:55:42');
 
 -- --------------------------------------------------------
 

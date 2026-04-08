@@ -1,78 +1,54 @@
 <?php
-/**
- * Get Mode API
- * Returns current system mode: "registration" or "attendance"
- * Arduino checks this every 3 seconds to know which mode to operate in
- *
- * For REGISTRATION mode, also returns:
- * - registration_id: Current user being registered
- * - finger_number: Which finger (1-10)
- * - scan_number: Which scan (0-4 for 5 total scans)
- * - total_fingers: How many fingers to register
- */
 
-header('Content-Type: application/json');
-require_once '../config/db.php';
+declare(strict_types=1);
 
-function ensureFingerprintRegistrationTable($mysqli) {
-    $mysqli->query("CREATE TABLE IF NOT EXISTS fingerprint_registrations (
-        id INT AUTO_INCREMENT PRIMARY KEY,
-        student_id INT NOT NULL,
-        finger_number INT NOT NULL DEFAULT 1,
-        scan_number INT NOT NULL DEFAULT 0,
-        total_fingers INT NOT NULL DEFAULT 1,
-        status ENUM('active','completed','cancelled') NOT NULL DEFAULT 'active',
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-        INDEX idx_status_updated (status, updated_at),
-        INDEX idx_student_status (student_id, status)
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
-}
+require_once __DIR__ . '/common.php';
+require_once __DIR__ . '/../config/db.php';
+
+require_method('GET');
 
 try {
-    ensureFingerprintRegistrationTable($mysqli);
+    $lastCompletedStmt = $mysqli->prepare("SELECT sensor_id FROM device_commands WHERE mode = 'ENROLL' AND status = 'COMPLETED' AND sensor_id IS NOT NULL ORDER BY updated_at DESC LIMIT 1");
+    $lastCompletedStmt->execute();
+    $lastCompleted = $lastCompletedStmt->get_result()->fetch_assoc();
+    $lastSensorId = $lastCompleted ? (int)$lastCompleted['sensor_id'] : null;
 
-    // Get current mode from settings table used by the active schema.
-    $stmt = $mysqli->prepare("SELECT setting_value FROM settings WHERE setting_key = 'current_mode' LIMIT 1");
+    $stmt = $mysqli->prepare("SELECT id, student_id, finger_index, scan_step, total_scan_steps, error_message FROM device_commands WHERE mode = 'ENROLL' AND status IN ('PENDING','IN_PROGRESS') ORDER BY created_at DESC LIMIT 1");
     $stmt->execute();
-    $result = $stmt->get_result()->fetch_assoc();
+    $command = $stmt->get_result()->fetch_assoc();
 
-    $mode = $result ? $result['setting_value'] : 'attendance';
-
-    $response = [
-        'success' => true,
-        'mode' => $mode,
-        'timestamp' => time()
-    ];
-
-    // If in registration mode, get active registration details.
-    if ($mode === 'registration') {
-        $stmt = $mysqli->prepare("SELECT id AS registration_id, student_id, finger_number, scan_number, total_fingers, status FROM fingerprint_registrations WHERE status = 'active' ORDER BY updated_at DESC LIMIT 1");
-        $stmt->execute();
-        $regData = $stmt->get_result()->fetch_assoc();
-
-        if ($regData) {
-            $response['registration_id'] = $regData['registration_id'];
-            $response['student_id'] = $regData['student_id'];
-            $response['finger_number'] = (int)$regData['finger_number'];
-            $response['scan_number'] = (int)$regData['scan_number'];
-            $response['total_fingers'] = (int)$regData['total_fingers'];
-        } else {
-            $response['registration_id'] = '';
-            $response['finger_number'] = 1;
-            $response['scan_number'] = 0;
-            $response['total_fingers'] = 1;
-        }
+    if (!$command) {
+        api_response(200, [
+            'success' => true,
+            'mode' => 'attendance',
+            'message' => 'No active registration',
+            'last_sensor_id' => $lastSensorId
+        ]);
     }
 
-    echo json_encode($response);
+    $totalFingers = 1;
+    if (!empty($command['error_message']) && preg_match('/total_fingers:(\d+)/', (string)$command['error_message'], $m)) {
+        $totalFingers = max(1, (int)$m[1]);
+    }
 
-} catch (Exception $e) {
-    // Default to attendance mode on error to avoid blocking scanner loop.
-    echo json_encode([
+    $scanStep = $command['scan_step'] !== null ? (int)$command['scan_step'] : 0;
+    $totalScanSteps = $command['total_scan_steps'] !== null ? (int)$command['total_scan_steps'] : 3;
+
+    api_response(200, [
         'success' => true,
-        'mode' => 'attendance',
+        'mode' => 'registration',
+        'registration_id' => (int)$command['id'],
+        'finger_number' => (int)$command['finger_index'],
+        'total_fingers' => $totalFingers,
+        'scan_step' => $scanStep,
+        'total_scan_steps' => $totalScanSteps,
+        'message' => 'Waiting for scan...',
+        'last_sensor_id' => $lastSensorId
+    ]);
+} catch (Throwable $e) {
+    api_response(500, [
+        'success' => false,
+        'message' => 'Failed to get mode',
         'error' => $e->getMessage()
     ]);
 }
-?>

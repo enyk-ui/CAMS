@@ -5,89 +5,144 @@
  */
 
 session_start();
+ob_start();
 require_once '../config/db.php';
 require '../includes/header.php';
 
-// Get filter values
-$filter_date = $_GET['date'] ?? date('Y-m-d');
-$filter_student = $_GET['student'] ?? '';
-$filter_status = $_GET['status'] ?? '';
-
-// Build query
-$where = [];
-$where[] = "a.attendance_date >= DATE_SUB('$filter_date', INTERVAL 30 DAY)";
-
-if ($filter_date) {
-    $where[] = "DATE(a.attendance_date) = '$filter_date'";
-}
-
-if ($filter_student) {
-    $where[] = "(s.first_name LIKE '%$filter_student%' OR s.last_name LIKE '%$filter_student%' OR s.student_id LIKE '%$filter_student%')";
-}
-
-if ($filter_status) {
-    $where[] = "a.status = '$filter_status'";
-}
-
-$where_clause = !empty($where) ? "WHERE " . implode(" AND ", $where) : "";
-
-// Get attendance records
-$query = "
-    SELECT
-        s.student_id,
-        s.first_name,
-        s.last_name,
-        a.attendance_date,
-        a.time_in_am,
-        a.time_out_am,
-        a.time_in_pm,
-        a.time_out_pm,
-        a.status
-    FROM attendance a
-    JOIN students s ON a.student_id = s.id
-    $where_clause
-    ORDER BY a.attendance_date DESC, a.created_at DESC
-    LIMIT 1000
-";
-
-$result = $mysqli->query($query);
-$logs = [];
-
-while ($row = $result->fetch_assoc()) {
-    $logs[] = $row;
-}
-
-// Handle export
-if (isset($_GET['export'])) {
-    $export_type = $_GET['export'];
-
-    if ($export_type === 'csv') {
-        header('Content-Type: text/csv');
-        header('Content-Disposition: attachment; filename="attendance_export_' . date('Y-m-d') . '.csv"');
-
-        $fp = fopen('php://output', 'w');
-        fputcsv($fp, ['Date', 'Student ID', 'Name', 'Time In (AM)', 'Time Out (AM)', 'Time In (PM)', 'Time Out (PM)', 'Status']);
-
-        foreach ($logs as $log) {
-            fputcsv($fp, [
-                $log['attendance_date'],
-                $log['student_id'],
-                $log['first_name'] . ' ' . $log['last_name'],
-                $log['time_in_am'] ?? '-',
-                $log['time_out_am'] ?? '-',
-                $log['time_in_pm'] ?? '-',
-                $log['time_out_pm'] ?? '-',
-                strtoupper($log['status'])
-            ]);
-        }
-
-        fclose($fp);
-        exit;
+function normalizeDateValue($value, $fallback)
+{
+    if ($value === null || $value === '') {
+        return $fallback;
     }
+
+    $date = DateTime::createFromFormat('Y-m-d', $value);
+    return ($date && $date->format('Y-m-d') === $value) ? $value : $fallback;
 }
 
-// Get students for filter dropdown
-$students_result = $mysqli->query("SELECT id, student_id, first_name, last_name FROM students ORDER BY first_name");
+function fetchAttendanceLogs($mysqli, $startDate, $endDate, $studentFilter = '', $statusFilter = '', $limit = 1000)
+{
+    $sql = "
+        SELECT
+            s.student_id,
+            s.first_name,
+            s.last_name,
+            a.attendance_date,
+            a.time_in_am,
+            a.time_out_am,
+            a.time_in_pm,
+            a.time_out_pm,
+            a.status
+        FROM attendance a
+        JOIN students s ON a.student_id = s.id
+        WHERE a.attendance_date BETWEEN ? AND ?
+    ";
+
+    $types = 'ss';
+    $params = [$startDate, $endDate];
+
+    if ($studentFilter !== '') {
+        $sql .= " AND (s.first_name LIKE ? OR s.last_name LIKE ? OR s.student_id LIKE ?)";
+        $studentLike = '%' . $studentFilter . '%';
+        $params[] = $studentLike;
+        $params[] = $studentLike;
+        $params[] = $studentLike;
+        $types .= 'sss';
+    }
+
+    if ($statusFilter !== '') {
+        $sql .= " AND a.status = ?";
+        $params[] = $statusFilter;
+        $types .= 's';
+    }
+
+    $sql .= " ORDER BY a.attendance_date DESC, a.created_at DESC";
+
+    if ($limit !== null) {
+        $sql .= " LIMIT " . (int) $limit;
+    }
+
+    $stmt = $mysqli->prepare($sql);
+    if (!$stmt) {
+        return [];
+    }
+
+    $bindParams = [$types];
+    foreach ($params as $index => $value) {
+        $bindParams[] = &$params[$index];
+    }
+
+    call_user_func_array([$stmt, 'bind_param'], $bindParams);
+    $stmt->execute();
+
+    $result = $stmt->get_result();
+    $logs = [];
+
+    while ($row = $result->fetch_assoc()) {
+        $logs[] = $row;
+    }
+
+    $stmt->close();
+
+    return $logs;
+}
+
+$default_start_date = date('Y-m-d', strtotime('-30 days'));
+$default_end_date = date('Y-m-d');
+$legacy_date = normalizeDateValue($_GET['date'] ?? '', '');
+
+$filter_start_date = normalizeDateValue($_GET['start_date'] ?? '', $default_start_date);
+$filter_end_date = normalizeDateValue($_GET['end_date'] ?? '', $default_end_date);
+
+if ($legacy_date !== '' && !isset($_GET['start_date']) && !isset($_GET['end_date'])) {
+    $filter_start_date = $legacy_date;
+    $filter_end_date = $legacy_date;
+}
+
+if ($filter_start_date > $filter_end_date) {
+    [$filter_start_date, $filter_end_date] = [$filter_end_date, $filter_start_date];
+}
+
+$filter_student = trim($_GET['student'] ?? '');
+$filter_status = trim($_GET['status'] ?? '');
+
+if (($_GET['export'] ?? '') === 'csv') {
+    $export_logs = fetchAttendanceLogs($mysqli, $filter_start_date, $filter_end_date, $filter_student, $filter_status, null);
+
+    if (ob_get_length() !== false) {
+        ob_end_clean();
+    }
+
+    header('Content-Type: text/csv; charset=UTF-8');
+    header('Content-Disposition: attachment; filename="attendance_logs_' . $filter_start_date . '_to_' . $filter_end_date . '.csv"');
+
+    $fp = fopen('php://output', 'w');
+    fwrite($fp, "\xEF\xBB\xBF");
+    fputcsv($fp, ['Date', 'Student ID', 'Name', 'Time In (AM)', 'Time Out (AM)', 'Time In (PM)', 'Time Out (PM)', 'Status']);
+
+    foreach ($export_logs as $log) {
+        fputcsv($fp, [
+            $log['attendance_date'],
+            $log['student_id'],
+            $log['first_name'] . ' ' . $log['last_name'],
+            $log['time_in_am'] ?? '-',
+            $log['time_out_am'] ?? '-',
+            $log['time_in_pm'] ?? '-',
+            $log['time_out_pm'] ?? '-',
+            strtoupper($log['status'])
+        ]);
+    }
+
+    fclose($fp);
+    exit;
+}
+
+$logs = fetchAttendanceLogs($mysqli, $filter_start_date, $filter_end_date, $filter_student, $filter_status, 1000);
+$export_query = http_build_query([
+    'start_date' => $filter_start_date,
+    'end_date' => $filter_end_date,
+    'student' => $filter_student,
+    'status' => $filter_status,
+], '', '&', PHP_QUERY_RFC3986);
 ?>
 
 <!-- Filters -->
@@ -95,8 +150,13 @@ $students_result = $mysqli->query("SELECT id, student_id, first_name, last_name 
     <div class="card-body">
         <form method="GET" class="row g-3">
             <div class="col-md-3">
-                <label for="date" class="form-label">Date</label>
-                <input type="date" class="form-control" id="date" name="date" value="<?php echo $filter_date; ?>">
+                <label for="start_date" class="form-label">Start Date</label>
+                <input type="date" class="form-control" id="start_date" name="start_date" value="<?php echo htmlspecialchars($filter_start_date); ?>">
+            </div>
+
+            <div class="col-md-3">
+                <label for="end_date" class="form-label">End Date</label>
+                <input type="date" class="form-control" id="end_date" name="end_date" value="<?php echo htmlspecialchars($filter_end_date); ?>">
             </div>
 
             <div class="col-md-3">
@@ -126,7 +186,7 @@ $students_result = $mysqli->query("SELECT id, student_id, first_name, last_name 
 
 <!-- Export Buttons -->
 <div class="mb-3">
-    <a href="?date=<?php echo $filter_date; ?>&student=<?php echo $filter_student; ?>&status=<?php echo $filter_status; ?>&export=csv" class="btn btn-outline-success">
+    <a href="?<?php echo htmlspecialchars($export_query); ?>&export=csv" class="btn btn-outline-success">
         <i class="bi bi-file-earmark-csv"></i> Export CSV
     </a>
 </div>

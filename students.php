@@ -19,9 +19,9 @@ if (isset($_GET['delete'])) {
     $message_type = "success";
 }
 
-// Get all students
+// Get all students with linked fingerprint summary.
 $students = [];
-$result = $mysqli->query("SELECT id, student_id, first_name, last_name, email, year, section, status FROM students ORDER BY created_at DESC");
+$result = $mysqli->query("SELECT s.id, s.student_id, s.first_name, s.last_name, s.email, s.year, s.section, s.status, COALESCE(fp_summary.fingerprint_count, 0) AS fingerprint_count, COALESCE(fp_summary.fingerprint_list, '') AS fingerprint_list FROM students s LEFT JOIN ( SELECT u.student_no, COUNT(fp.id) AS fingerprint_count, GROUP_CONCAT(CONCAT('F', fp.finger_index, ':', fp.sensor_id) ORDER BY fp.finger_index SEPARATOR ', ') AS fingerprint_list FROM users u LEFT JOIN fingerprints fp ON fp.user_id = u.id GROUP BY u.student_no ) fp_summary ON fp_summary.student_no = s.student_id ORDER BY s.created_at DESC");
 
 while ($row = $result->fetch_assoc()) {
     $students[] = $row;
@@ -55,6 +55,7 @@ while ($row = $result->fetch_assoc()) {
                         <th>Year</th>
                         <th>Section</th>
                         <th>Email</th>
+                        <th>Fingerprints</th>
                         <th>Status</th>
                         <th>Actions</th>
                     </tr>
@@ -67,6 +68,14 @@ while ($row = $result->fetch_assoc()) {
                         <td><?php echo $student['year']; ?></td>
                         <td><?php echo htmlspecialchars($student['section']); ?></td>
                         <td><small><?php echo htmlspecialchars($student['email']); ?></small></td>
+                        <td>
+                            <?php if ((int)$student['fingerprint_count'] > 0): ?>
+                                <span class="badge bg-primary"><?php echo (int)$student['fingerprint_count']; ?> linked</span>
+                                <div class="small text-muted mt-1"><?php echo htmlspecialchars($student['fingerprint_list']); ?></div>
+                            <?php else: ?>
+                                <span class="badge bg-secondary">No fingerprints</span>
+                            <?php endif; ?>
+                        </td>
                         <td>
                             <?php if ($student['status'] === 'active'): ?>
                                 <span class="badge bg-success">Active</span>

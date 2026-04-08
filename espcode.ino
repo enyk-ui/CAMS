@@ -1,0 +1,1046 @@
+#include <Arduino.h>
+#include <ESP8266WiFi.h>
+#include <ESP8266HTTPClient.h>
+#include <WiFiClient.h>
+#include <SoftwareSerial.h>
+#include <Adafruit_Fingerprint.h>
+#include <ArduinoJson.h>
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
+
+#define WIFI_SSID "Redmi Note 13"
+#define WIFI_PASSWORD "aaaaaaaa"
+#define WIFI_TIMEOUT 20000
+#define WIFI_RECONNECT_INTERVAL 30000
+#define SENSOR_RETRY_INTERVAL 5000
+#define SERVER_CHECK_INTERVAL 10000
+#define COMMAND_POLL_INTERVAL 1500
+#define SYSTEM_SUMMARY_INTERVAL 10000
+#define ENROLL_SCAN_STEPS 3
+#define ENROLL_IDLE_COOLDOWN_MS 5000
+
+#define SENSOR_RX_PIN D1
+#define SENSOR_TX_PIN D2
+#define SENSOR_BAUD_RATE 57600
+
+#define LCD_I2C_ADDRESS 0x27
+#define LCD_COLS 16
+#define LCD_ROWS 2
+#define I2C_SDA_PIN D3
+#define I2C_SCL_PIN D4
+
+// Update this to your PHP server IP.
+const char* SERVER_HOST = "10.18.239.94";
+
+const uint16_t SERVER_PORT = 80;
+const int DEVICE_ID = 1;
+const char* DEVICE_KEY = "CAMS_ESP8266";
+const char* API_BASE_PATH = "/CAMS/api";
+
+SoftwareSerial fingerSerial(SENSOR_RX_PIN, SENSOR_TX_PIN);
+Adafruit_Fingerprint finger(&fingerSerial);
+LiquidCrystal_I2C lcd(LCD_I2C_ADDRESS, LCD_COLS, LCD_ROWS);
+
+unsigned long lastWifiAttempt = 0;
+unsigned long lastIdleScanMs = 0;
+unsigned long lastModeLogMs = 0;
+unsigned long lastIdleModeLogMs = 0;
+unsigned long lastCmdFetchLogMs = 0;
+unsigned long lastCmdPollMs = 0;
+unsigned long lastSensorStatusLogMs = 0;
+unsigned long lastWifiSkipLogMs = 0;
+unsigned long lastSensorInitAttemptMs = 0;
+unsigned long lastScanErrorLogMs = 0;
+unsigned long lastServerCheckMs = 0;
+unsigned long lastSystemSummaryMs = 0;
+unsigned long lastEnrollCompleteMs = 0;
+String lcdLine1 = "";
+String lcdLine2 = "";
+bool wifiWasConnected = false;
+bool sensorReady = false;
+bool serverReady = false;
+bool bootReady = false;
+String currentMode = "IDLE";
+
+void logInfo(const String& tag, const String& message) {
+  Serial.print("[");
+  Serial.print(tag);
+  Serial.print("] ");
+  Serial.println(message);
+}
+
+void logSystemSummary() {
+  if (millis() - lastSystemSummaryMs < SYSTEM_SUMMARY_INTERVAL) {
+    return;
+  }
+
+  lastSystemSummaryMs = millis();
+  String ip = (WiFi.status() == WL_CONNECTED) ? WiFi.localIP().toString() : "-";
+
+  Serial.print("[SYS] WIFI=");
+  Serial.print((WiFi.status() == WL_CONNECTED) ? "UP" : "DOWN");
+  Serial.print(" SERVER=");
+  Serial.print(serverReady ? "UP" : "DOWN");
+  Serial.print(" SENSOR=");
+  Serial.print(sensorReady ? "READY" : "DOWN");
+  Serial.print(" IP=");
+  Serial.print(ip);
+  Serial.print(" CURRENT=");
+  Serial.println(currentMode);
+}
+
+bool checkServerReady() {
+  if (WiFi.status() != WL_CONNECTED) {
+    serverReady = false;
+    return false;
+  }
+
+  unsigned long now = millis();
+  if (now - lastServerCheckMs < SERVER_CHECK_INTERVAL) {
+    return serverReady;
+  }
+  lastServerCheckMs = now;
+
+  logInfo("SERVER", "Checking API health...");
+
+  String body;
+  int statusCode = 0;
+  if (!httpGet(String(API_BASE_PATH) + "/health.php", body, &statusCode)) {
+    serverReady = false;
+    logInfo("SERVER", "API unreachable (HTTP code=" + String(statusCode) + ")");
+    return false;
+  }
+
+  logInfo("SERVER", "API health HTTP code=" + String(statusCode));
+
+  StaticJsonDocument<256> doc;
+  DeserializationError err = deserializeJson(doc, body);
+  if (err) {
+    serverReady = false;
+    logInfo("SERVER", "API response parse failed");
+    return false;
+  }
+
+  if (!(doc["success"] | false)) {
+    serverReady = false;
+    logInfo("SERVER", "API returned success=false");
+    return false;
+  }
+
+  serverReady = true;
+  logInfo("SERVER", "API reachable");
+  return true;
+}
+
+void logSensorStatus() {
+  if (millis() - lastSensorStatusLogMs < 10000) {
+    return;
+  }
+
+  lastSensorStatusLogMs = millis();
+  if (sensorReady) {
+    logInfo("SENSOR", "Status=READY");
+  } else {
+    logInfo("SENSOR", "Status=NOT_READY");
+  }
+}
+
+bool initFingerprintSensor() {
+  lastSensorInitAttemptMs = millis();
+
+  fingerSerial.begin(SENSOR_BAUD_RATE);
+  finger.begin(SENSOR_BAUD_RATE);
+
+  if (!finger.verifyPassword()) {
+    sensorReady = false;
+    logInfo("SENSOR", "Not found / password verify failed");
+    return false;
+  }
+
+  sensorReady = true;
+  Serial.print("[SENSOR] Ready, baud=");
+  Serial.println(SENSOR_BAUD_RATE);
+
+  uint8_t countStatus = finger.getTemplateCount();
+  if (countStatus == FINGERPRINT_OK) {
+    Serial.print("[SENSOR] Templates=");
+    Serial.println(finger.templateCount);
+  } else {
+    Serial.print("[SENSOR] getTemplateCount failed, code=");
+    Serial.println(countStatus);
+  }
+  return true;
+}
+
+typedef struct DeviceCommand {
+  String mode;
+  int studentId;
+  int fingerIndex;
+  int sensorId;
+  bool valid;
+} DeviceCommand;
+
+DeviceCommand getCommand();
+
+void displayLCD(const String& message) {
+  String line1 = message;
+  if (line1.length() > LCD_COLS) {
+    line1 = line1.substring(0, LCD_COLS);
+  }
+
+  if (lcdLine1 == line1 && lcdLine2 == "") {
+    return;
+  }
+
+  lcdLine1 = line1;
+  lcdLine2 = "";
+
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print(line1);
+}
+
+void displayLCD(const String& line1, const String& line2) {
+  String l1 = line1;
+  String l2 = line2;
+
+  if (l1.length() > LCD_COLS) {
+    l1 = l1.substring(0, LCD_COLS);
+  }
+  if (l2.length() > LCD_COLS) {
+    l2 = l2.substring(0, LCD_COLS);
+  }
+
+  if (lcdLine1 == l1 && lcdLine2 == l2) {
+    return;
+  }
+
+  lcdLine1 = l1;
+  lcdLine2 = l2;
+
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print(l1);
+  lcd.setCursor(0, 1);
+  lcd.print(l2);
+}
+
+bool connectWiFi() {
+  if (WiFi.status() == WL_CONNECTED) {
+    if (!wifiWasConnected) {
+      wifiWasConnected = true;
+      Serial.print("[WIFI] Connected, IP=");
+      Serial.println(WiFi.localIP());
+    }
+    return true;
+  }
+
+  if (wifiWasConnected) {
+    wifiWasConnected = false;
+    serverReady = false;
+    logInfo("WIFI", "Disconnected");
+  }
+
+  unsigned long now = millis();
+  if (now - lastWifiAttempt < WIFI_RECONNECT_INTERVAL) {
+    if (now - lastWifiSkipLogMs > 5000) {
+      lastWifiSkipLogMs = now;
+      logInfo("WIFI", "Retry pending...");
+    }
+    return false;
+  }
+
+  lastWifiAttempt = now;
+
+  logInfo("WIFI", "Connecting...");
+  displayLCD("WiFi connecting");
+
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+
+  unsigned long start = millis();
+  while (WiFi.status() != WL_CONNECTED && (millis() - start) < WIFI_TIMEOUT) {
+    delay(200);
+    yield();
+  }
+
+  if (WiFi.status() == WL_CONNECTED) {
+    wifiWasConnected = true;
+    Serial.print("[WIFI] Connected, IP=");
+    Serial.println(WiFi.localIP());
+    displayLCD("WiFi connected");
+    return true;
+  }
+
+  logInfo("WIFI", "Connect failed");
+  displayLCD("WiFi failed");
+  return false;
+}
+
+bool httpGet(const String& path, String& outBody, int* outStatusCode) {
+  outBody = "";
+  if (WiFi.status() != WL_CONNECTED) {
+    logInfo("HTTP", "GET skipped, WiFi not connected");
+    if (outStatusCode) {
+      *outStatusCode = 0;
+    }
+    return false;
+  }
+
+  WiFiClient client;
+  HTTPClient http;
+  String url = "http://" + String(SERVER_HOST) + ":" + String(SERVER_PORT) + path;
+  Serial.print("[HTTP] GET ");
+  Serial.println(url);
+
+  if (!http.begin(client, url)) {
+    serverReady = false;
+    logInfo("HTTP", "GET begin() failed");
+    if (outStatusCode) {
+      *outStatusCode = 0;
+    }
+    return false;
+  }
+
+  http.setTimeout(5000);
+
+  int code = http.GET();
+  if (outStatusCode) {
+    *outStatusCode = code;
+  }
+  Serial.print("[HTTP] GET status=");
+  Serial.println(code);
+  
+  if (code <= 0) {
+    serverReady = false;
+    String err = HTTPClient::errorToString(code);
+    logInfo("HTTP", "GET error=" + err);
+  }
+  if (code > 0) {
+    serverReady = true;
+    outBody = http.getString();
+  }
+
+  http.end();
+  return code > 0;
+}
+
+bool httpPostJson(const String& path, const String& payload, String& outBody) {
+  outBody = "";
+  if (WiFi.status() != WL_CONNECTED) {
+    logInfo("HTTP", "POST skipped, WiFi not connected");
+    return false;
+  }
+
+  WiFiClient client;
+  HTTPClient http;
+  String url = "http://" + String(SERVER_HOST) + ":" + String(SERVER_PORT) + path;
+  Serial.print("[HTTP] POST ");
+  Serial.println(url);
+
+  if (!http.begin(client, url)) {
+    serverReady = false;
+    logInfo("HTTP", "POST begin() failed");
+    return false;
+  }
+
+  http.setTimeout(5000);
+  http.addHeader("Content-Type", "application/json");
+  int code = http.POST(payload);
+  Serial.print("[HTTP] POST status=");
+  Serial.println(code);
+  if (code <= 0) {
+    serverReady = false;
+    String err = HTTPClient::errorToString(code);
+    logInfo("HTTP", "POST error=" + err);
+  }
+
+  if (code > 0) {
+    serverReady = true;
+    outBody = http.getString();
+  }
+
+  http.end();
+  return code > 0;
+}
+
+DeviceCommand getCommand() {
+  DeviceCommand cmd;
+  cmd.mode = "IDLE";
+  cmd.studentId = 0;
+  cmd.fingerIndex = 0;
+  cmd.sensorId = 0;
+  cmd.valid = false;
+
+  // Reduce API polling frequency without changing fingerprint scan timing.
+  if (millis() - lastCmdPollMs < COMMAND_POLL_INTERVAL) {
+    return cmd;
+  }
+  lastCmdPollMs = millis();
+
+  String body;
+  String path = String(API_BASE_PATH) + "/device-command.php?device_id=" + String(DEVICE_ID);
+  if (millis() - lastCmdFetchLogMs > 10000) {
+    lastCmdFetchLogMs = millis();
+    logInfo("MODE", "Fetching mode from API...");
+  }
+  int statusCode = 0;
+  if (!httpGet(path, body, &statusCode)) {
+    logInfo("MODE", "Fetch failed (server unreachable/error)");
+    return cmd;
+  }
+
+  logInfo("MODE", "Server connected, mode received (HTTP code=" + String(statusCode) + ")");
+
+  StaticJsonDocument<256> doc;
+  DeserializationError err = deserializeJson(doc, body);
+  if (err) {
+    Serial.println("[CMD] JSON parse failed");
+    return cmd;
+  }
+
+  if (!(doc["success"] | false)) {
+    Serial.println("[CMD] success=false");
+    return cmd;
+  }
+
+  cmd.mode = String((const char*)doc["mode"]);
+  cmd.studentId = doc["student_id"] | 0;
+  cmd.fingerIndex = doc["finger_index"] | 0;
+  cmd.sensorId = doc["sensor_id"] | 0;
+  cmd.valid = true;
+
+  Serial.print("[MODE] mode=");
+  Serial.print(cmd.mode);
+  Serial.print(" student_id=");
+  Serial.print(cmd.studentId);
+  Serial.print(" finger_index=");
+  Serial.print(cmd.fingerIndex);
+  Serial.print(" sensor_id=");
+  Serial.println(cmd.sensorId);
+
+  return cmd;
+}
+
+int getNextAvailableID() {
+  for (int id = 1; id <= 127; id++) {
+    uint8_t p = finger.loadModel(id);
+    if (p != FINGERPRINT_OK) {
+      return id;
+    }
+  }
+
+  return -1;
+}
+
+bool captureToBuffer(uint8_t bufferNo, unsigned long timeoutMs) {
+  unsigned long start = millis();
+
+  while (millis() - start < timeoutMs) {
+    uint8_t p = finger.getImage();
+    if (p == FINGERPRINT_NOFINGER) {
+      delay(20);
+      yield();
+      continue;
+    }
+
+    if (p != FINGERPRINT_OK) {
+      return false;
+    }
+
+    p = finger.image2Tz(bufferNo);
+    return p == FINGERPRINT_OK;
+  }
+
+  return false;
+}
+
+bool waitFingerRemoved(unsigned long timeoutMs) {
+  unsigned long start = millis();
+
+  while (millis() - start < timeoutMs) {
+    if (finger.getImage() == FINGERPRINT_NOFINGER) {
+      return true;
+    }
+    delay(20);
+    yield();
+  }
+
+  return false;
+}
+
+void showEnrollStep(int fingerIndex, int stepNo, const String& message) {
+  String line1 = "Scanning F" + String(fingerIndex);
+  String line2 = String(stepNo) + " of " + String(ENROLL_SCAN_STEPS);
+
+  if (message.length() > 0) {
+    line2 += " ";
+    line2 += message;
+  }
+
+  displayLCD(line1, line2);
+}
+
+bool enrollFinger(int sensorId, int fingerIndex, int studentId) {
+  Serial.print("[ENROLL] Start ID=");
+  Serial.println(sensorId);
+
+  uint8_t p;
+  unsigned long start;
+
+  // Report scan step 1 to server before starting
+  reportScanProgress(studentId, fingerIndex, 1, ENROLL_SCAN_STEPS);
+
+  // Step 1: getImage() + image2Tz(1)
+  showEnrollStep(fingerIndex, 1, "");
+  start = millis();
+  do {
+    p = finger.getImage();
+    if (p == FINGERPRINT_OK) {
+      break;
+    }
+    if (p != FINGERPRINT_NOFINGER) {
+      Serial.print("[ENROLL] getImage #1 failed: ");
+      Serial.println(p);
+      displayLCD("Not Found", "Try Again");
+      return false;
+    }
+    delay(20);
+    yield();
+  } while (millis() - start < 15000);
+
+  if (p != FINGERPRINT_OK) {
+    Serial.println("[ENROLL] getImage #1 timeout");
+    displayLCD("Not Found", "Try Again");
+    return false;
+  }
+
+  p = finger.image2Tz(1);
+  if (p != FINGERPRINT_OK) {
+    Serial.print("[ENROLL] image2Tz(1) failed: ");
+    Serial.println(p);
+    displayLCD("Not Found", "Try Again");
+    return false;
+  }
+
+  // Wait for finger removal.
+  showEnrollStep(fingerIndex, 1, "Remove");
+  start = millis();
+  while (millis() - start < 8000) {
+    p = finger.getImage();
+    if (p == FINGERPRINT_NOFINGER) {
+      break;
+    }
+    delay(20);
+    yield();
+  }
+
+  if (p != FINGERPRINT_NOFINGER) {
+    Serial.println("[ENROLL] remove finger timeout");
+    displayLCD("Not Found", "Try Again");
+    return false;
+  }
+
+  // Report scan step 2 to server
+  reportScanProgress(studentId, fingerIndex, 2, ENROLL_SCAN_STEPS);
+
+  // Step 2: getImage() + image2Tz(2)
+  showEnrollStep(fingerIndex, 2, "");
+  start = millis();
+  do {
+    p = finger.getImage();
+    if (p == FINGERPRINT_OK) {
+      break;
+    }
+    if (p != FINGERPRINT_NOFINGER) {
+      Serial.print("[ENROLL] getImage #2 failed: ");
+      Serial.println(p);
+      displayLCD("Not Found", "Try Again");
+      return false;
+    }
+    delay(20);
+    yield();
+  } while (millis() - start < 15000);
+
+  if (p != FINGERPRINT_OK) {
+    Serial.println("[ENROLL] getImage #2 timeout");
+    displayLCD("Not Found", "Try Again");
+    return false;
+  }
+
+  p = finger.image2Tz(2);
+  if (p != FINGERPRINT_OK) {
+    Serial.print("[ENROLL] image2Tz(2) failed: ");
+    Serial.println(p);
+    displayLCD("Not Found", "Try Again");
+    return false;
+  }
+
+  // Report scan step 3 to server
+  reportScanProgress(studentId, fingerIndex, 3, ENROLL_SCAN_STEPS);
+
+  // Step 3: createModel()
+  showEnrollStep(fingerIndex, 3, "Save");
+  p = finger.createModel();
+  if (p != FINGERPRINT_OK) {
+    Serial.print("[ENROLL] createModel failed: ");
+    Serial.println(p);
+    displayLCD("Not Found", "Try Again");
+    return false;
+  }
+
+  // Step 4: storeModel(sensor_id)
+  p = finger.storeModel(sensorId);
+  if (p != FINGERPRINT_OK) {
+    Serial.print("[ENROLL] storeModel failed: ");
+    Serial.println(p);
+    displayLCD("Not Found", "Try Again");
+    return false;
+  }
+
+  // Prevent accidental immediate attendance reads by requiring finger release.
+  showEnrollStep(fingerIndex, 3, "Remove");
+  waitFingerRemoved(5000);
+
+  Serial.println("[ENROLL] Success");
+  displayLCD("Finger " + String(fingerIndex) + " Saved", "ID:" + String(sensorId));
+  return true;
+}
+
+bool sendEnrollResult(int studentId, int fingerIndex, int sensorId) {
+  StaticJsonDocument<192> doc;
+  doc["student_id"] = studentId;
+  doc["finger_index"] = fingerIndex;
+  doc["sensor_id"] = sensorId;
+
+  String payload;
+  serializeJson(doc, payload);
+
+  String body;
+  Serial.println("[ENROLL] Posting enroll result to server...");
+  if (!httpPostJson(String(API_BASE_PATH) + "/enroll-result.php", payload, body)) {
+    Serial.println("[ENROLL] POST enroll-result failed");
+    return false;
+  }
+
+  StaticJsonDocument<256> resp;
+  if (deserializeJson(resp, body)) {
+    Serial.println("[ENROLL] Response parse failed");
+    return false;
+  }
+
+  bool ok = resp["success"] | false;
+  Serial.print("[ENROLL] Result POST success=");
+  Serial.println(ok ? "true" : "false");
+  return ok;
+}
+
+bool advanceToNextFinger(int studentId, int fingerIndex) {
+  StaticJsonDocument<128> doc;
+  doc["student_id"] = studentId;
+  doc["finger_index"] = fingerIndex;
+
+  String payload;
+  serializeJson(doc, payload);
+
+  String body;
+  Serial.println("[ENROLL] Requesting advance to next finger...");
+  if (!httpPostJson(String(API_BASE_PATH) + "/advance-finger.php", payload, body)) {
+    Serial.println("[ENROLL] POST advance-finger failed");
+    return false;
+  }
+
+  StaticJsonDocument<256> resp;
+  if (deserializeJson(resp, body)) {
+    Serial.println("[ENROLL] Advance response parse failed");
+    return false;
+  }
+
+  bool ok = resp["success"] | false;
+  bool enrollmentComplete = resp["enrollment_complete"] | false;
+  int nextFinger = resp["next_finger_index"] | 0;
+
+  if (ok) {
+    if (enrollmentComplete) {
+      Serial.println("[ENROLL] All fingers enrolled, returning to IDLE");
+    } else {
+      Serial.print("[ENROLL] Advanced to finger ");
+      Serial.println(nextFinger);
+    }
+  }
+
+  return ok;
+}
+
+bool reportScanProgress(int studentId, int fingerIndex, int scanStep, int totalSteps) {
+  StaticJsonDocument<128> doc;
+  doc["student_id"] = studentId;
+  doc["finger_index"] = fingerIndex;
+  doc["scan_step"] = scanStep;
+  doc["total_steps"] = totalSteps;
+
+  String payload;
+  serializeJson(doc, payload);
+
+  String body;
+  Serial.print("[ENROLL] Reporting scan progress: step ");
+  Serial.print(scanStep);
+  Serial.print(" of ");
+  Serial.println(totalSteps);
+
+  if (!httpPostJson(String(API_BASE_PATH) + "/scan-progress.php", payload, body)) {
+    Serial.println("[ENROLL] POST scan-progress failed");
+    return false;
+  }
+
+  return true;
+}
+
+bool sendDeleteResult(int sensorId, bool success, const String& errorMessage) {
+  StaticJsonDocument<192> doc;
+  doc["sensor_id"] = sensorId;
+  doc["success"] = success;
+  if (!success && errorMessage.length() > 0) {
+    doc["error_message"] = errorMessage;
+  }
+
+  String payload;
+  serializeJson(doc, payload);
+
+  String body;
+  Serial.println("[DELETE] Posting delete result to server...");
+  if (!httpPostJson(String(API_BASE_PATH) + "/delete-result.php", payload, body)) {
+    Serial.println("[DELETE] POST delete-result failed");
+    return false;
+  }
+
+  StaticJsonDocument<256> resp;
+  if (deserializeJson(resp, body)) {
+    Serial.println("[DELETE] Response parse failed");
+    return false;
+  }
+
+  bool ok = resp["success"] | false;
+  Serial.print("[DELETE] Result POST success=");
+  Serial.println(ok ? "true" : "false");
+  return ok;
+}
+
+bool deleteFingerprintModel(int sensorId, String& outError) {
+  if (sensorId <= 0 || sensorId > 127) {
+    outError = "Invalid sensor_id";
+    return false;
+  }
+
+  uint8_t p = finger.deleteModel(sensorId);
+  if (p == FINGERPRINT_OK || p == FINGERPRINT_BADLOCATION || p == FINGERPRINT_FLASHERR) {
+    // Treat missing/invalid slot as non-blocking for retry cleanup.
+    return true;
+  }
+
+  outError = "deleteModel code=" + String((int)p);
+  return false;
+}
+
+bool sendAttendance(int sensorId) {
+  StaticJsonDocument<192> doc;
+  doc["sensor_id"] = sensorId;
+  doc["device_id"] = DEVICE_ID;
+
+  String payload;
+  serializeJson(doc, payload);
+
+  String body;
+  Serial.println("[ATTEND] Posting attendance to server...");
+  if (!httpPostJson(String(API_BASE_PATH) + "/attendance.php", payload, body)) {
+    Serial.println("[ATTEND] POST failed");
+    displayLCD("Not Found", "Try Again");
+    return false;
+  }
+
+  StaticJsonDocument<256> resp;
+  if (deserializeJson(resp, body)) {
+    Serial.println("[ATTEND] JSON parse failed");
+    displayLCD("Not Found", "Try Again");
+    return false;
+  }
+
+  bool ok = resp["success"] | false;
+  if (!ok) {
+    const char* msg = resp["message"] | "Attendance err";
+    Serial.print("[ATTEND] API error: ");
+    Serial.println(msg);
+    displayLCD("Not Found", "Try Again");
+    return false;
+  }
+
+  const char* msg = resp["message"] | "Attendance OK";
+  const char* type = resp["type"] | "";
+  const char* studentName = resp["student_name"] | "John";
+
+  String welcome = "Welcome " + String(studentName);
+
+  String timeValue = "";
+  if (resp.containsKey("time")) {
+    timeValue = String((const char*)resp["time"]);
+  } else if (resp.containsKey("timestamp")) {
+    String ts = String((const char*)resp["timestamp"]);
+    int spacePos = ts.indexOf(' ');
+    if (spacePos >= 0 && spacePos + 1 < ts.length()) {
+      timeValue = ts.substring(spacePos + 1);
+    }
+  }
+
+  if (timeValue.length() > 8) {
+    timeValue = timeValue.substring(0, 8);
+  }
+
+  String timeLine = "Time ";
+  if (String(type) == "IN") {
+    timeLine += "IN:";
+  } else {
+    timeLine += "OUT:";
+  }
+  timeLine += timeValue;
+
+  Serial.print("[ATTEND] ");
+  Serial.print(msg);
+  Serial.print(" ");
+  Serial.println(type);
+
+  displayLCD(welcome, timeLine);
+  return true;
+}
+
+void setup() {
+  Serial.begin(115200);
+  delay(100);
+  Serial.println("\n[CAMS] Boot");
+  Serial.println("[SYSTEM] -------------------------------");
+  Serial.print("[CONFIG] Device ID=");
+  Serial.println(DEVICE_ID);
+  Serial.print("[CONFIG] Server=");
+  Serial.print(SERVER_HOST);
+  Serial.print(":");
+  Serial.println(SERVER_PORT);
+  Serial.print("[CONFIG] API Path=");
+  Serial.println(API_BASE_PATH);
+  Serial.print("[CONFIG] WiFi SSID=");
+  Serial.println(WIFI_SSID);
+
+  Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
+  lcd.init();
+  lcd.backlight();
+  displayLCD("Booting...", "Step1: WiFi");
+
+  // Force immediate first attempts in loop() boot sequence.
+  lastWifiAttempt = 0;
+  lastServerCheckMs = 0;
+  lastSensorInitAttemptMs = 0;
+}
+
+void loop() {
+  if (!bootReady) {
+    if (WiFi.status() != WL_CONNECTED) {
+      displayLCD("Booting...", "Step1: WiFi");
+      connectWiFi();
+      logSystemSummary();
+      return;
+    }
+
+    if (!sensorReady) {
+      displayLCD("Booting...", "Step2: Sensor");
+      if (lastSensorInitAttemptMs == 0 || millis() - lastSensorInitAttemptMs >= SENSOR_RETRY_INTERVAL) {
+        logInfo("SENSOR", "Initializing...");
+        if (!initFingerprintSensor()) {
+          displayLCD("Sensor error", "Retrying...");
+          logSystemSummary();
+          return;
+        }
+      }
+      if (!sensorReady) {
+        logSystemSummary();
+        return;
+      }
+    }
+
+    displayLCD("Booting...", "Step3: Server");
+    if (!checkServerReady()) {
+      displayLCD("Server offline", "Retrying...");
+      logSystemSummary();
+      return;
+    }
+
+    bootReady = true;
+    displayLCD("Boot complete", "System ready");
+    logInfo("BOOT", "Ready (WiFi->Sensor->Server)");
+  }
+
+  if (currentMode != "ENROLL") {
+    logSensorStatus();
+    logSystemSummary();
+  }
+
+  if (WiFi.status() == WL_CONNECTED && !serverReady) {
+    if (!checkServerReady()) {
+      displayLCD("Server offline", "Check network");
+      logSystemSummary();
+      return;
+    }
+    if (currentMode != "ENROLL") {
+      logSystemSummary();
+    }
+  }
+
+  connectWiFi();
+
+  if (WiFi.status() != WL_CONNECTED) {
+    return;
+  }
+
+  if (!serverReady) {
+    displayLCD("Server offline", "Wait scan");
+    return;
+  }
+
+  DeviceCommand cmd = getCommand();
+
+  if (cmd.valid) {
+    currentMode = cmd.mode;
+  }
+
+  if (currentMode != "ENROLL" && millis() - lastModeLogMs > 3000) {
+    lastModeLogMs = millis();
+    Serial.print("[MODE] Current=");
+    Serial.print(currentMode);
+    if (!cmd.valid) {
+      Serial.print(" (stale: command fetch failed)");
+    }
+    Serial.println();
+  }
+
+  if (cmd.valid && currentMode == "ENROLL") {
+    logInfo("MODE", "REGISTRATION active");
+    displayLCD("Reg mode", "Wait finger...");
+    int sensorId = getNextAvailableID();
+    if (sensorId <= 0) {
+      Serial.println("[ENROLL] No free sensor ID");
+      displayLCD("Not Found", "Try Again");
+      return;
+    }
+
+    int enrollFingerIndex = cmd.fingerIndex > 0 ? cmd.fingerIndex : 1;
+    bool enrolled = enrollFinger(sensorId, enrollFingerIndex, cmd.studentId);
+    if (!enrolled) {
+      displayLCD("Not Found", "Try Again");
+      return;
+    }
+
+    bool posted = sendEnrollResult(cmd.studentId, cmd.fingerIndex, sensorId);
+    if (posted) {
+      lastEnrollCompleteMs = millis();
+      displayLCD("Saved!", "ID:" + String(sensorId));
+
+      // Signal the server to advance to the next finger (or IDLE if all done).
+      // This ensures the UI only advances AFTER the device finishes all 3 scans.
+      advanceToNextFinger(cmd.studentId, cmd.fingerIndex);
+    } else {
+      displayLCD("Not Found", "Try Again");
+    }
+
+    return;
+  }
+
+  if (cmd.valid && currentMode == "DELETE") {
+    if (cmd.sensorId <= 0) {
+      logInfo("DELETE", "Missing sensor_id in delete command");
+      sendDeleteResult(0, false, "Missing sensor_id");
+      return;
+    }
+
+    Serial.print("[DELETE] Deleting sensor_id=");
+    Serial.println(cmd.sensorId);
+    displayLCD("Deleting", "ID:" + String(cmd.sensorId));
+
+    String deleteError = "";
+    bool deleted = deleteFingerprintModel(cmd.sensorId, deleteError);
+    bool posted = sendDeleteResult(cmd.sensorId, deleted, deleteError);
+
+    if (deleted && posted) {
+      displayLCD("Delete done", "ID:" + String(cmd.sensorId));
+    } else {
+      displayLCD("Delete failed", "ID:" + String(cmd.sensorId));
+    }
+
+    return;
+  }
+
+  if (!cmd.valid && currentMode == "ENROLL") {
+    if (millis() - lastIdleModeLogMs > 10000) {
+      lastIdleModeLogMs = millis();
+      logInfo("MODE", "Registration mode, waiting for finger scan command...");
+    }
+    displayLCD("Reg mode", "Wait finger...");
+    return;
+  }
+
+  // IDLE mode: wait for scan and send attendance on match.
+  if (currentMode == "IDLE") {
+    if (lastEnrollCompleteMs > 0 && (millis() - lastEnrollCompleteMs) < ENROLL_IDLE_COOLDOWN_MS) {
+      displayLCD("Enroll done", "Wait finger...");
+      return;
+    }
+
+    if (millis() - lastIdleModeLogMs > 3000) {
+      lastIdleModeLogMs = millis();
+      logInfo("MODE", "IDLE waiting for fingerprint");
+    }
+  }
+  displayLCD("Scan Finger");
+
+  if (millis() - lastIdleScanMs < 150) {
+    return;
+  }
+  lastIdleScanMs = millis();
+
+  uint8_t p = finger.getImage();
+  if (p == FINGERPRINT_NOFINGER) {
+    return;
+  }
+
+  if (p != FINGERPRINT_OK) {
+    if (millis() - lastScanErrorLogMs > 3000) {
+      lastScanErrorLogMs = millis();
+      Serial.print("[IDLE] getImage error code=");
+      Serial.println(p);
+    }
+    return;
+  }
+
+  logInfo("IDLE", "Finger detected");
+
+  p = finger.image2Tz();
+  if (p != FINGERPRINT_OK) {
+    Serial.print("[IDLE] image2Tz failed, code=");
+    Serial.println(p);
+    return;
+  }
+
+  p = finger.fingerFastSearch();
+  if (p != FINGERPRINT_OK) {
+    if (p == FINGERPRINT_NOTFOUND) {
+      Serial.println("[IDLE] No match (finger not enrolled)");
+      displayLCD("Not enrolled", "Try Again");
+    } else {
+      Serial.print("[IDLE] Search failed, code=");
+      Serial.println(p);
+      displayLCD("Read error", "Try Again");
+    }
+    return;
+  }
+
+  int matchedId = finger.fingerID;
+  Serial.print("[IDLE] Match sensor_id=");
+  Serial.println(matchedId);
+  sendAttendance(matchedId);
+}
