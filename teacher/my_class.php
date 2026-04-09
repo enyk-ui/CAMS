@@ -7,12 +7,44 @@
 require_once '../config/db.php';
 require '../includes/header.php';
 
+function studentColumnExists(mysqli $mysqli, string $columnName): bool
+{
+    $safeColumn = $mysqli->real_escape_string($columnName);
+    $result = $mysqli->query("SHOW COLUMNS FROM students LIKE '{$safeColumn}'");
+    return $result && $result->num_rows > 0;
+}
+
+function formatStudentName(array $student): string
+{
+    $first = trim((string) ($student['first_name'] ?? ''));
+    $middle = trim((string) ($student['middle_initial'] ?? ''));
+    $last = trim((string) ($student['last_name'] ?? ''));
+    $ext = trim((string) ($student['extension'] ?? ''));
+
+    $name = $last;
+    if ($first !== '') {
+        $name .= ($name !== '' ? ', ' : '') . $first;
+    }
+    if ($middle !== '') {
+        $name .= ' ' . strtoupper(substr($middle, 0, 1)) . '.';
+    }
+    if ($ext !== '') {
+        $name .= ' ' . $ext;
+    }
+
+    return trim($name);
+}
+
 if ($_SESSION['role'] !== 'teacher') {
     header('Location: ../index.php?error=Unauthorized');
     exit;
 }
 
 $section = $_SESSION['teacher_section'];
+$hasMiddleInitialColumn = studentColumnExists($mysqli, 'middle_initial');
+$hasExtensionColumn = studentColumnExists($mysqli, 'extension');
+$middleInitialExpr = $hasMiddleInitialColumn ? 'COALESCE(middle_initial, "")' : '""';
+$extensionExpr = $hasExtensionColumn ? 'COALESCE(extension, "")' : '""';
 
 // Get all students in section
 $students = [];
@@ -22,6 +54,8 @@ $result = $mysqli->query("
         student_id,
         first_name,
         last_name,
+        {$middleInitialExpr} AS middle_initial,
+        {$extensionExpr} AS extension,
         email,
         year,
         status,
@@ -64,7 +98,7 @@ while ($row = $result->fetch_assoc()) {
                                     <?php foreach ($students as $student): ?>
                                         <tr>
                                             <td><strong><?php echo htmlspecialchars($student['student_id']); ?></strong></td>
-                                            <td><?php echo htmlspecialchars($student['first_name'] . ' ' . $student['last_name']); ?></td>
+                                            <td><?php echo htmlspecialchars(formatStudentName($student)); ?></td>
                                             <td><?php echo htmlspecialchars($student['email'] ?? '-'); ?></td>
                                             <td><?php echo $student['year'] ?? '-'; ?></td>
                                             <td>

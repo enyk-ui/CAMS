@@ -103,6 +103,25 @@ foreach ($createSql as $sql) {
     }
 }
 
+// Ensure legacy students tables get required name fields.
+$studentMiddleInitialCol = $mysqli->query("SHOW COLUMNS FROM students LIKE 'middle_initial'");
+if ($studentMiddleInitialCol && $studentMiddleInitialCol->num_rows === 0) {
+    if ($mysqli->query("ALTER TABLE students ADD COLUMN middle_initial VARCHAR(10) DEFAULT NULL AFTER first_name")) {
+        echo "✅ Added students.middle_initial column\n";
+    } else {
+        echo "⚠️ Could not add students.middle_initial: {$mysqli->error}\n";
+    }
+}
+
+$studentExtensionCol = $mysqli->query("SHOW COLUMNS FROM students LIKE 'extension'");
+if ($studentExtensionCol && $studentExtensionCol->num_rows === 0) {
+    if ($mysqli->query("ALTER TABLE students ADD COLUMN extension VARCHAR(20) DEFAULT NULL AFTER last_name")) {
+        echo "✅ Added students.extension column\n";
+    } else {
+        echo "⚠️ Could not add students.extension: {$mysqli->error}\n";
+    }
+}
+
 // Disable foreign key checks for alterations.
 $mysqli->query("SET FOREIGN_KEY_CHECKS = 0");
 
@@ -118,6 +137,25 @@ foreach ($tablesToMigrate as $table => $colDef) {
     if ($checkCol && $checkCol->num_rows > 0) {
         $mysqli->query("ALTER TABLE `$table` CHANGE COLUMN user_id student_id $colDef");
         echo "✅ Renamed user_id to student_id in $table\n";
+    }
+}
+
+// Ensure scan progress columns exist for enrollment UI step tracking.
+$scanStepCol = $mysqli->query("SHOW COLUMNS FROM device_commands LIKE 'scan_step'");
+if ($scanStepCol && $scanStepCol->num_rows === 0) {
+    if ($mysqli->query("ALTER TABLE device_commands ADD COLUMN scan_step TINYINT UNSIGNED DEFAULT NULL AFTER sensor_id")) {
+        echo "✅ Added device_commands.scan_step column\n";
+    } else {
+        echo "⚠️ Could not add device_commands.scan_step: {$mysqli->error}\n";
+    }
+}
+
+$totalScanStepsCol = $mysqli->query("SHOW COLUMNS FROM device_commands LIKE 'total_scan_steps'");
+if ($totalScanStepsCol && $totalScanStepsCol->num_rows === 0) {
+    if ($mysqli->query("ALTER TABLE device_commands ADD COLUMN total_scan_steps TINYINT UNSIGNED DEFAULT 3 AFTER scan_step")) {
+        echo "✅ Added device_commands.total_scan_steps column\n";
+    } else {
+        echo "⚠️ Could not add device_commands.total_scan_steps: {$mysqli->error}\n";
     }
 }
 
@@ -152,12 +190,55 @@ if ($checkUsersSchema && $checkUsersSchema->num_rows > 0) {
 // Re-enable foreign key checks.
 $mysqli->query("SET FOREIGN_KEY_CHECKS = 1");
 
+// Repair legacy device_commands.id when it is not a proper AUTO_INCREMENT PK.
+$idMeta = $mysqli->query("SHOW COLUMNS FROM device_commands LIKE 'id'");
+if ($idMeta && $idMeta->num_rows > 0) {
+    $idRow = $idMeta->fetch_assoc();
+    $needsRepair = true;
+
+    if (!empty($idRow['Key']) && strtoupper((string)$idRow['Key']) === 'PRI' &&
+        !empty($idRow['Extra']) && stripos((string)$idRow['Extra'], 'auto_increment') !== false) {
+        $needsRepair = false;
+    }
+
+    if ($needsRepair) {
+        echo "⚠️ Repairing device_commands.id to AUTO_INCREMENT PRIMARY KEY...\n";
+
+        $hasTempPk = $mysqli->query("SHOW COLUMNS FROM device_commands LIKE 'command_pk'");
+        if (!$hasTempPk || $hasTempPk->num_rows === 0) {
+            if (!$mysqli->query("ALTER TABLE device_commands ADD COLUMN command_pk BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY FIRST")) {
+                echo "⚠️ Could not add command_pk: {$mysqli->error}\n";
+            }
+        }
+
+        $dropOldIdOk = $mysqli->query("ALTER TABLE device_commands DROP COLUMN id");
+        if (!$dropOldIdOk) {
+            echo "⚠️ Could not drop old device_commands.id: {$mysqli->error}\n";
+        }
+
+        $renameOk = $mysqli->query("ALTER TABLE device_commands CHANGE COLUMN command_pk id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT");
+        if (!$renameOk) {
+            echo "⚠️ Could not rename command_pk to id: {$mysqli->error}\n";
+        } else {
+            echo "✅ Repaired device_commands.id as AUTO_INCREMENT PRIMARY KEY\n";
+        }
+    }
+}
+
 // Insert default admin user if not exists.
 $adminCheck = $mysqli->query("SELECT id FROM users WHERE username = 'admin' LIMIT 1");
 if ($adminCheck->num_rows === 0) {
     $defaultPassword = password_hash('admin123', PASSWORD_DEFAULT);
-    $mysqli->query("INSERT INTO users (username, password, full_name, role) VALUES ('admin', '$defaultPassword', 'Administrator', 'admin')");
-    echo "✅ Default admin user created (username: admin, password: admin123)\n";
+    $mysqli->query("INSERT INTO users (username, password, full_name, email, role) VALUES ('admin', '$defaultPassword', 'Administrator', 'admin@cams.edu.ph', 'admin')");
+    echo "✅ Default admin user created (admin@cams.edu.ph / admin123)\n";
+}
+
+// Insert default teacher user if not exists.
+$teacherCheck = $mysqli->query("SELECT id FROM users WHERE username = 'teacher' LIMIT 1");
+if ($teacherCheck->num_rows === 0) {
+    $defaultPassword = password_hash('teacher123', PASSWORD_DEFAULT);
+    $mysqli->query("INSERT INTO users (username, password, full_name, email, role) VALUES ('teacher', '$defaultPassword', 'Demo Teacher', 'teacher@cams.edu.ph', 'teacher')");
+    echo "✅ Default teacher user created (teacher@cams.edu.ph / teacher123)\n";
 }
 
 echo "✅ Database setup complete. Tables:\n";

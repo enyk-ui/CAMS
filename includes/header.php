@@ -43,9 +43,8 @@ function getPageTitle() {
         'students' => 'Students',
         'register' => 'Student Registration',
         'logs' => 'Attendance Logs',
-        'notifications' => 'Notifications',
         'settings' => 'Settings',
-        'users' => 'Users',
+        'users' => 'Teachers',
         'my_class' => 'My Class',
         'attendance_report' => 'Attendance Reports',
         'profile' => 'Profile'
@@ -63,9 +62,8 @@ function getPageSubtitle() {
         'students' => 'Manage student records and information',
         'register' => 'Add new students and enroll fingerprints',
         'logs' => 'View detailed attendance records',
-        'notifications' => 'System alerts and notifications',
         'settings' => 'System configuration and preferences',
-        'users' => 'Manage system users and permissions',
+        'users' => 'Manage teacher accounts',
         'my_class' => 'Your assigned students and attendance',
         'attendance_report' => 'Generate and view attendance reports'
     ];
@@ -806,7 +804,6 @@ function getPageSubtitle() {
                                 'students' => 'people',
                                 'register' => 'person-plus',
                                 'logs' => 'clock-history',
-                                'notifications' => 'bell',
                                 'settings' => 'gear',
                                 'users' => 'person-gear',
                                 'my_class' => 'mortarboard',

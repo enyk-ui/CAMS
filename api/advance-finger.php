@@ -7,14 +7,31 @@ require_once __DIR__ . '/../config/db.php';
 
 require_method('POST');
 
+function advanceFingerColumnExists(mysqli $mysqli, string $column): bool
+{
+    $safe = $mysqli->real_escape_string($column);
+    $result = $mysqli->query("SHOW COLUMNS FROM device_commands LIKE '{$safe}'");
+    return $result && $result->num_rows > 0;
+}
+
 try {
     $input = read_json_body();
 
     $studentId = require_positive_int($input, 'student_id');
     $currentFingerIndex = require_positive_int($input, 'finger_index');
 
+    $linkColumn = advanceFingerColumnExists($mysqli, 'student_id') ? 'student_id' : (advanceFingerColumnExists($mysqli, 'user_id') ? 'user_id' : null);
+    if ($linkColumn === null) {
+        api_response(500, [
+            'success' => false,
+            'message' => 'device_commands must contain student_id or user_id column'
+        ]);
+    }
+
+    $updatedOrderColumn = advanceFingerColumnExists($mysqli, 'updated_at') ? 'updated_at' : 'id';
+
     // Find the completed command for this finger to get total_fingers.
-    $commandStmt = $mysqli->prepare("SELECT id, device_id, error_message FROM device_commands WHERE mode = 'ENROLL' AND student_id = ? AND finger_index = ? AND status = 'COMPLETED' ORDER BY updated_at DESC LIMIT 1");
+    $commandStmt = $mysqli->prepare("SELECT id, device_id, error_message FROM device_commands WHERE mode = 'ENROLL' AND {$linkColumn} = ? AND finger_index = ? AND status = 'COMPLETED' ORDER BY {$updatedOrderColumn} DESC LIMIT 1");
     $commandStmt->bind_param('ii', $studentId, $currentFingerIndex);
     $commandStmt->execute();
     $command = $commandStmt->get_result()->fetch_assoc();
@@ -40,7 +57,7 @@ try {
         $nextFinger = $currentFingerIndex + 1;
         $notes = 'total_fingers:' . (string)$totalFingers;
 
-        $nextCommandStmt = $mysqli->prepare("INSERT INTO device_commands (device_id, mode, student_id, finger_index, status, error_message) VALUES (?, 'ENROLL', ?, ?, 'PENDING', ?)");
+        $nextCommandStmt = $mysqli->prepare("INSERT INTO device_commands (device_id, mode, {$linkColumn}, finger_index, status, error_message) VALUES (?, 'ENROLL', ?, ?, 'PENDING', ?)");
         $nextCommandStmt->bind_param('iiis', $deviceId, $studentId, $nextFinger, $notes);
         $nextCommandStmt->execute();
 

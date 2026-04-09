@@ -6,85 +6,203 @@
 
 session_start();
 require_once '../config/db.php';
+require_once '../helpers/SchoolYearHelper.php';
 require '../includes/header.php';
 
 // Get today's date
 $today = date('Y-m-d');
 
+SchoolYearHelper::ensureSchoolYearSupport($mysqli);
+$activeSchoolYear = SchoolYearHelper::getEffectiveSchoolYearRange($mysqli);
+$schoolYearStart = $activeSchoolYear['start_date'] ?? date('Y-01-01');
+$schoolYearEnd = $activeSchoolYear['end_date'] ?? date('Y-12-31');
+
+$reportDate = $today;
+if ($reportDate < $schoolYearStart) {
+    $reportDate = $schoolYearStart;
+} elseif ($reportDate > $schoolYearEnd) {
+    $reportDate = $schoolYearEnd;
+}
+
+$chartWindowStart = date('Y-m-d', strtotime($reportDate . ' -30 days'));
+if ($chartWindowStart < $schoolYearStart) {
+    $chartWindowStart = $schoolYearStart;
+}
+$chartWindowEnd = $reportDate;
+
+function tableExists(mysqli $mysqli, string $tableName): bool
+{
+    $sql = 'SELECT 1 FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = ? LIMIT 1';
+    $stmt = $mysqli->prepare($sql);
+    $stmt->bind_param('s', $tableName);
+    $stmt->execute();
+    $result = $stmt->get_result();
+
+    return (bool) ($result && $result->num_rows > 0);
+}
+
+function columnExists(mysqli $mysqli, string $tableName, string $columnName): bool
+{
+    $sql = 'SELECT 1 FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = ? AND column_name = ? LIMIT 1';
+    $stmt = $mysqli->prepare($sql);
+    $stmt->bind_param('ss', $tableName, $columnName);
+    $stmt->execute();
+    $result = $stmt->get_result();
+
+    return (bool) ($result && $result->num_rows > 0);
+}
+
+$hasAttendance = tableExists($mysqli, 'attendance');
+$hasAttendanceLogs = tableExists($mysqli, 'attendance_logs');
+$hasStudents = tableExists($mysqli, 'students');
+$hasUsers = tableExists($mysqli, 'users');
+
+$attendanceLogsUserColumn = null;
+$attendanceLogsTimeColumn = null;
+
+if ($hasAttendanceLogs) {
+    if (columnExists($mysqli, 'attendance_logs', 'user_id')) {
+        $attendanceLogsUserColumn = 'user_id';
+    } elseif (columnExists($mysqli, 'attendance_logs', 'student_id')) {
+        $attendanceLogsUserColumn = 'student_id';
+    }
+
+    if (columnExists($mysqli, 'attendance_logs', 'timestamp')) {
+        $attendanceLogsTimeColumn = 'timestamp';
+    } elseif (columnExists($mysqli, 'attendance_logs', 'created_at')) {
+        $attendanceLogsTimeColumn = 'created_at';
+    }
+}
+
 // Get statistics
-$stats = [];
+$stats = [
+    'total_students' => 0,
+    'present' => 0,
+    'late' => 0,
+    'absent' => 0,
+];
 
-// Total students
-$result = $mysqli->query("SELECT COUNT(*) as count FROM students WHERE status = 'active'");
-$stats['total_students'] = $result->fetch_assoc()['count'] ?? 0;
-
-// Attendance today
-$result = $mysqli->query("
-    SELECT
-        status,
-        COUNT(*) as count
-    FROM attendance
-    WHERE attendance_date = '$today'
-    GROUP BY status
-");
-
-$stats['present'] = 0;
-$stats['late'] = 0;
-$stats['absent'] = 0;
-
-while ($row = $result->fetch_assoc()) {
-    if ($row['status'] === 'present') $stats['present'] = $row['count'];
-    if ($row['status'] === 'late') $stats['late'] = $row['count'];
-    if ($row['status'] === 'absent') $stats['absent'] = $row['count'];
+if ($hasStudents) {
+    $result = $mysqli->query("SELECT COUNT(*) as count FROM students WHERE status = 'active'");
+    $stats['total_students'] = (int) ($result->fetch_assoc()['count'] ?? 0);
+} elseif ($hasUsers) {
+    $result = $mysqli->query("SELECT COUNT(*) as count FROM users WHERE status = 'active'");
+    $stats['total_students'] = (int) ($result->fetch_assoc()['count'] ?? 0);
 }
 
-// Recent scans
 $recent_scans = [];
-$result = $mysqli->query("
-    SELECT
-        s.first_name,
-        s.last_name,
-        a.status,
-        a.time_in_am,
-        a.time_in_pm,
-        a.time_out_am,
-        a.time_out_pm,
-        a.attendance_date
-    FROM attendance a
-    JOIN students s ON a.student_id = s.id
-    WHERE a.attendance_date = '$today'
-    ORDER BY a.updated_at DESC
-    LIMIT 10
-");
-
-while ($row = $result->fetch_assoc()) {
-    $recent_scans[] = $row;
-}
-
-// Get daily attendance for chart (last 30 days)
-$chart_data = [];
-$result = $mysqli->query("
-    SELECT
-        attendance_date,
-        SUM(CASE WHEN status = 'present' THEN 1 ELSE 0 END) as present,
-        SUM(CASE WHEN status = 'late' THEN 1 ELSE 0 END) as late,
-        SUM(CASE WHEN status = 'absent' THEN 1 ELSE 0 END) as absent
-    FROM attendance
-    WHERE attendance_date >= DATE_SUB(CURDATE(), INTERVAL 30 DAY)
-    GROUP BY attendance_date
-    ORDER BY attendance_date ASC
-");
-
 $dates = [];
 $present_data = [];
 $late_data = [];
 $absent_data = [];
 
-while ($row = $result->fetch_assoc()) {
-    $dates[] = date('M d', strtotime($row['attendance_date']));
-    $present_data[] = $row['present'] ?? 0;
-    $late_data[] = $row['late'] ?? 0;
-    $absent_data[] = $row['absent'] ?? 0;
+if ($hasAttendance) {
+    $hasExplicitAbsentRowsToday = false;
+
+    $result = $mysqli->query("\n        SELECT status, COUNT(*) as count\n        FROM attendance\n        WHERE attendance_date = '$reportDate'\n        GROUP BY status\n    ");
+
+    while ($row = $result->fetch_assoc()) {
+        if ($row['status'] === 'present') $stats['present'] = (int) $row['count'];
+        if ($row['status'] === 'late') $stats['late'] = (int) $row['count'];
+        if ($row['status'] === 'absent') {
+            $stats['absent'] = (int) $row['count'];
+            $hasExplicitAbsentRowsToday = true;
+        }
+    }
+
+    $derivedAbsentToday = max(0, $stats['total_students'] - $stats['present'] - $stats['late']);
+    if (!$hasExplicitAbsentRowsToday || $stats['absent'] < $derivedAbsentToday) {
+        $stats['absent'] = $derivedAbsentToday;
+    }
+
+    if ($hasStudents) {
+        $result = $mysqli->query("\n            SELECT\n                s.first_name,\n                s.last_name,\n                a.status,\n                a.time_in_am,\n                a.time_in_pm,\n                a.time_out_am,\n                a.time_out_pm,\n                a.attendance_date\n            FROM attendance a\n            JOIN students s ON a.student_id = s.id\n            WHERE a.attendance_date = '$reportDate'\n            ORDER BY a.updated_at DESC\n            LIMIT 10\n        ");
+
+        while ($row = $result->fetch_assoc()) {
+            $recent_scans[] = $row;
+        }
+    }
+
+    $result = $mysqli->query("\n        SELECT\n            attendance_date,\n            SUM(CASE WHEN status = 'present' THEN 1 ELSE 0 END) as present,\n            SUM(CASE WHEN status = 'late' THEN 1 ELSE 0 END) as late,\n            SUM(CASE WHEN status = 'absent' THEN 1 ELSE 0 END) as absent\n        FROM attendance\n        WHERE attendance_date BETWEEN '$chartWindowStart' AND '$chartWindowEnd'\n        GROUP BY attendance_date\n        ORDER BY attendance_date ASC\n    ");
+
+    $attendanceByDate = [];
+    while ($row = $result->fetch_assoc()) {
+        $dateKey = (string) ($row['attendance_date'] ?? '');
+        if ($dateKey === '') {
+            continue;
+        }
+
+        $attendanceByDate[$dateKey] = [
+            'present' => (int) ($row['present'] ?? 0),
+            'late' => (int) ($row['late'] ?? 0),
+            'absent' => (int) ($row['absent'] ?? 0)
+        ];
+    }
+
+    $cursor = strtotime($chartWindowStart);
+    $endTs = strtotime($chartWindowEnd);
+    while ($cursor !== false && $endTs !== false && $cursor <= $endTs) {
+        $dateKey = date('Y-m-d', $cursor);
+        $presentCount = (int) ($attendanceByDate[$dateKey]['present'] ?? 0);
+        $lateCount = (int) ($attendanceByDate[$dateKey]['late'] ?? 0);
+        $storedAbsent = (int) ($attendanceByDate[$dateKey]['absent'] ?? 0);
+        $derivedAbsent = max(0, $stats['total_students'] - $presentCount - $lateCount);
+        $absentCount = max($storedAbsent, $derivedAbsent);
+
+        $dates[] = date('M d', $cursor);
+        $present_data[] = $presentCount;
+        $late_data[] = $lateCount;
+        $absent_data[] = $absentCount;
+
+        $cursor = strtotime('+1 day', $cursor);
+    }
+} elseif ($hasAttendanceLogs && $attendanceLogsUserColumn && $attendanceLogsTimeColumn) {
+    $todayResult = $mysqli->query("\n        SELECT COUNT(DISTINCT {$attendanceLogsUserColumn}) AS present_count\n        FROM attendance_logs\n        WHERE DATE({$attendanceLogsTimeColumn}) = '$reportDate' AND type = 'IN'\n    ");
+    $stats['present'] = (int) ($todayResult->fetch_assoc()['present_count'] ?? 0);
+    $stats['late'] = 0;
+    $stats['absent'] = max(0, $stats['total_students'] - $stats['present']);
+
+    $nameExpr = "CONCAT('ID #', al.{$attendanceLogsUserColumn})";
+    $joinClause = '';
+
+    if ($attendanceLogsUserColumn === 'student_id' && $hasStudents) {
+        $nameExpr = "COALESCE(CONCAT(s.first_name, ' ', s.last_name), CONCAT('Student #', al.student_id))";
+        $joinClause = 'LEFT JOIN students s ON al.student_id = s.id';
+    } elseif ($attendanceLogsUserColumn === 'user_id' && $hasUsers) {
+        $nameExpr = "COALESCE(u.full_name, CONCAT('User #', al.user_id))";
+        $joinClause = 'LEFT JOIN users u ON al.user_id = u.id';
+    }
+
+    $result = $mysqli->query("\n        SELECT\n            {$nameExpr} AS first_name,\n            '' AS last_name,\n            CASE WHEN al.type = 'IN' THEN 'present' ELSE 'absent' END AS status,\n            CASE WHEN HOUR(al.{$attendanceLogsTimeColumn}) < 12 THEN TIME(al.{$attendanceLogsTimeColumn}) ELSE NULL END AS time_in_am,\n            CASE WHEN HOUR(al.{$attendanceLogsTimeColumn}) >= 12 THEN TIME(al.{$attendanceLogsTimeColumn}) ELSE NULL END AS time_in_pm,\n            NULL AS time_out_am,\n            NULL AS time_out_pm,\n            DATE(al.{$attendanceLogsTimeColumn}) AS attendance_date\n        FROM attendance_logs al\n        {$joinClause}\n        WHERE DATE(al.{$attendanceLogsTimeColumn}) = '$reportDate'\n        ORDER BY al.{$attendanceLogsTimeColumn} DESC\n        LIMIT 10\n    ");
+
+    while ($row = $result->fetch_assoc()) {
+        $recent_scans[] = $row;
+    }
+
+    $result = $mysqli->query("\n        SELECT\n            DATE({$attendanceLogsTimeColumn}) AS attendance_date,\n            COUNT(DISTINCT CASE WHEN type = 'IN' THEN {$attendanceLogsUserColumn} END) AS present\n        FROM attendance_logs\n        WHERE DATE({$attendanceLogsTimeColumn}) BETWEEN '$chartWindowStart' AND '$chartWindowEnd'\n        GROUP BY DATE({$attendanceLogsTimeColumn})\n        ORDER BY DATE({$attendanceLogsTimeColumn}) ASC\n    ");
+
+    $presentByDate = [];
+    while ($row = $result->fetch_assoc()) {
+        $dateKey = (string) ($row['attendance_date'] ?? '');
+        if ($dateKey === '') {
+            continue;
+        }
+        $presentByDate[$dateKey] = (int) ($row['present'] ?? 0);
+    }
+
+    $cursor = strtotime($chartWindowStart);
+    $endTs = strtotime($chartWindowEnd);
+    while ($cursor !== false && $endTs !== false && $cursor <= $endTs) {
+        $dateKey = date('Y-m-d', $cursor);
+        $presentCount = (int) ($presentByDate[$dateKey] ?? 0);
+
+        $dates[] = date('M d', $cursor);
+        $present_data[] = $presentCount;
+        $late_data[] = 0;
+        $absent_data[] = max(0, $stats['total_students'] - $presentCount);
+
+        $cursor = strtotime('+1 day', $cursor);
+    }
 }
 
 $chart_labels = json_encode($dates);
@@ -92,6 +210,13 @@ $chart_present = json_encode($present_data);
 $chart_late = json_encode($late_data);
 $chart_absent = json_encode($absent_data);
 ?>
+
+<div class="alert alert-info mb-3">
+    <i class="bi bi-mortarboard"></i>
+    Active School Year: <strong><?php echo htmlspecialchars($activeSchoolYear['label'] ?? 'N/A'); ?></strong>
+    (<?php echo htmlspecialchars($schoolYearStart); ?> to <?php echo htmlspecialchars($schoolYearEnd); ?>)
+    | Report date: <strong><?php echo htmlspecialchars($reportDate); ?></strong>
+</div>
 
 <!-- Summary Cards -->
 <div class="row mb-4">

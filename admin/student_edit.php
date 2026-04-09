@@ -8,6 +8,34 @@ session_start();
 require_once '../config/db.php';
 require '../includes/header.php';
 
+function studentColumnExists(mysqli $mysqli, string $columnName): bool
+{
+    $safeColumn = $mysqli->real_escape_string($columnName);
+    $result = $mysqli->query("SHOW COLUMNS FROM students LIKE '{$safeColumn}'");
+    return $result && $result->num_rows > 0;
+}
+
+function formatStudentDisplayName(array $student): string
+{
+    $first = trim((string) ($student['first_name'] ?? ''));
+    $middle = trim((string) ($student['middle_initial'] ?? ''));
+    $last = trim((string) ($student['last_name'] ?? ''));
+    $ext = trim((string) ($student['extension'] ?? ''));
+
+    $name = $last;
+    if ($first !== '') {
+        $name .= ($name !== '' ? ', ' : '') . $first;
+    }
+    if ($middle !== '') {
+        $name .= ' ' . strtoupper(substr($middle, 0, 1)) . '.';
+    }
+    if ($ext !== '') {
+        $name .= ' ' . $ext;
+    }
+
+    return trim($name);
+}
+
 // Get student ID from URL
 $student_id = $_GET['id'] ?? null;
 if (!$student_id) {
@@ -29,12 +57,16 @@ if (!$student) {
 
 $message = '';
 $message_type = 'success';
+$hasMiddleInitialColumn = studentColumnExists($mysqli, 'middle_initial');
+$hasExtensionColumn = studentColumnExists($mysqli, 'extension');
+$hasUpdatedAtColumn = studentColumnExists($mysqli, 'updated_at');
 
 // Handle form submission
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $student_id_input = trim($_POST['student_id']);
     $first_name = trim($_POST['first_name']);
-    $middle_initial = trim($_POST['middle_initial']);
+    $middle_initial = trim($_POST['middle_initial'] ?? '');
+    $extension = trim($_POST['extension'] ?? '');
     $last_name = trim($_POST['last_name']);
     $email = trim($_POST['email']);
     $year = intval($_POST['year']);
@@ -56,9 +88,50 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $message = 'Student ID already exists. Please use a unique ID.';
             $message_type = 'danger';
         } else {
-            // Update student
-            $stmt = $mysqli->prepare("UPDATE students SET student_id = ?, first_name = ?, middle_initial = ?, last_name = ?, email = ?, year = ?, section = ?, status = ?, updated_at = NOW() WHERE id = ?");
-            $stmt->bind_param("sssssissi", $student_id_input, $first_name, $middle_initial, $last_name, $email, $year, $section, $status, $student_id);
+            // Build update query based on available columns in current schema.
+            $setClauses = [
+                'student_id = ?',
+                'first_name = ?',
+                'last_name = ?',
+                'email = ?',
+                'year = ?',
+                'section = ?',
+                'status = ?'
+            ];
+            $types = 'ssssiss';
+            $params = [$student_id_input, $first_name, $last_name, $email, $year, $section, $status];
+
+            if ($hasMiddleInitialColumn) {
+                array_splice($setClauses, 2, 0, 'middle_initial = ?');
+                $types = 'sssssiss';
+                $params = [$student_id_input, $first_name, $middle_initial, $last_name, $email, $year, $section, $status];
+            }
+
+            if ($hasExtensionColumn) {
+                $insertIndex = $hasMiddleInitialColumn ? 4 : 3;
+                array_splice($setClauses, $insertIndex, 0, 'extension = ?');
+                if ($hasMiddleInitialColumn) {
+                    $types = 'ssssssiss';
+                    $params = [$student_id_input, $first_name, $middle_initial, $last_name, $extension, $email, $year, $section, $status];
+                } else {
+                    $types = 'sssssiss';
+                    $params = [$student_id_input, $first_name, $last_name, $extension, $email, $year, $section, $status];
+                }
+            }
+
+            if ($hasUpdatedAtColumn) {
+                $setClauses[] = 'updated_at = NOW()';
+            }
+
+            $sql = 'UPDATE students SET ' . implode(', ', $setClauses) . ' WHERE id = ?';
+            $stmt = $mysqli->prepare($sql);
+            $types .= 'i';
+            $params[] = $student_id;
+            $bindParams = [$types];
+            foreach ($params as $index => $value) {
+                $bindParams[] = &$params[$index];
+            }
+            call_user_func_array([$stmt, 'bind_param'], $bindParams);
             
             if ($stmt->execute()) {
                 $message = 'Student information updated successfully!';
@@ -110,6 +183,62 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                             <div class="form-text">Unique identifier for the student</div>
                         </div>
 
+                        <!-- Email -->
+                        <div class="col-md-6">
+                            <label for="email" class="form-label">Email *</label>
+                            <input type="email" class="form-control" id="email" name="email" 
+                                   value="<?php echo htmlspecialchars($student['email']); ?>" 
+                                   placeholder="juan@example.com" required>
+                        </div>
+
+                        <!-- First Name -->
+                        <div class="col-md-4">
+                            <label for="first_name" class="form-label">First Name *</label>
+                            <input type="text" class="form-control" id="first_name" name="first_name" 
+                                   value="<?php echo htmlspecialchars($student['first_name']); ?>" 
+                                   placeholder="Juan" required>
+                        </div>
+
+                        <!-- Middle Initial -->
+                        <?php if ($hasMiddleInitialColumn): ?>
+                            <div class="col-md-2">
+                                <label for="middle_initial" class="form-label">M.I.</label>
+                                <input type="text" class="form-control" id="middle_initial" name="middle_initial" 
+                                       value="<?php echo htmlspecialchars($student['middle_initial'] ?? ''); ?>" 
+                                       placeholder="D" maxlength="1">
+                            </div>
+                        <?php endif; ?>
+
+                        <!-- Last Name -->
+                        <div class="col-md-<?php echo $hasMiddleInitialColumn ? '4' : '6'; ?>">
+                            <label for="last_name" class="form-label">Last Name *</label>
+                            <input type="text" class="form-control" id="last_name" name="last_name" 
+                                   value="<?php echo htmlspecialchars($student['last_name']); ?>" 
+                                   placeholder="Dela Cruz" required>
+                        </div>
+
+                        <?php if ($hasExtensionColumn): ?>
+                            <div class="col-md-<?php echo $hasMiddleInitialColumn ? '2' : '6'; ?>">
+                                <label for="extension" class="form-label">Ext.</label>
+                                <?php $extensionOptions = ['', 'Jr', 'Sr', 'II', 'III', 'IV']; ?>
+                                <?php $currentExtension = (string) ($student['extension'] ?? ''); ?>
+                                <select class="form-select" id="extension" name="extension">
+                                    <option value="">Select ext (optional)</option>
+                                    <?php foreach ($extensionOptions as $extOption): ?>
+                                        <?php if ($extOption === '') continue; ?>
+                                        <option value="<?php echo htmlspecialchars($extOption); ?>" <?php echo $currentExtension === $extOption ? 'selected' : ''; ?>>
+                                            <?php echo htmlspecialchars($extOption); ?>
+                                        </option>
+                                    <?php endforeach; ?>
+                                    <?php if ($currentExtension !== '' && !in_array($currentExtension, $extensionOptions, true)): ?>
+                                        <option value="<?php echo htmlspecialchars($currentExtension); ?>" selected>
+                                            <?php echo htmlspecialchars($currentExtension); ?> (current)
+                                        </option>
+                                    <?php endif; ?>
+                                </select>
+                            </div>
+                        <?php endif; ?>
+
                         <!-- Year -->
                         <div class="col-md-6">
                             <label for="year" class="form-label">Year *</label>
@@ -123,44 +252,23 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                             </select>
                         </div>
 
-                        <!-- First Name -->
-                        <div class="col-md-4">
-                            <label for="first_name" class="form-label">First Name *</label>
-                            <input type="text" class="form-control" id="first_name" name="first_name" 
-                                   value="<?php echo htmlspecialchars($student['first_name']); ?>" 
-                                   placeholder="Juan" required>
-                        </div>
-
-                        <!-- Middle Initial -->
-                        <div class="col-md-2">
-                            <label for="middle_initial" class="form-label">M.I.</label>
-                            <input type="text" class="form-control" id="middle_initial" name="middle_initial" 
-                                   value="<?php echo htmlspecialchars($student['middle_initial'] ?? ''); ?>" 
-                                   placeholder="D" maxlength="1">
-                        </div>
-
-                        <!-- Last Name -->
-                        <div class="col-md-6">
-                            <label for="last_name" class="form-label">Last Name *</label>
-                            <input type="text" class="form-control" id="last_name" name="last_name" 
-                                   value="<?php echo htmlspecialchars($student['last_name']); ?>" 
-                                   placeholder="Dela Cruz" required>
-                        </div>
-
-                        <!-- Email -->
-                        <div class="col-md-8">
-                            <label for="email" class="form-label">Email *</label>
-                            <input type="email" class="form-control" id="email" name="email" 
-                                   value="<?php echo htmlspecialchars($student['email']); ?>" 
-                                   placeholder="juan@example.com" required>
-                        </div>
-
                         <!-- Section -->
-                        <div class="col-md-4">
+                        <div class="col-md-6">
                             <label for="section" class="form-label">Section *</label>
-                            <input type="text" class="form-control" id="section" name="section" 
-                                   value="<?php echo htmlspecialchars($student['section']); ?>" 
-                                   placeholder="e.g., A" required>
+                            <select class="form-select" id="section" name="section" required>
+                                <option value="">Select Section</option>
+                                <?php $sectionOptions = ['Alpha', 'Beta', 'Charlie', 'Delta']; ?>
+                                <?php foreach ($sectionOptions as $sectionOption): ?>
+                                    <option value="<?php echo htmlspecialchars($sectionOption); ?>" <?php echo $student['section'] === $sectionOption ? 'selected' : ''; ?>>
+                                        <?php echo htmlspecialchars($sectionOption); ?>
+                                    </option>
+                                <?php endforeach; ?>
+                                <?php if (!empty($student['section']) && !in_array($student['section'], $sectionOptions, true)): ?>
+                                    <option value="<?php echo htmlspecialchars($student['section']); ?>" selected>
+                                        <?php echo htmlspecialchars($student['section']); ?> (current)
+                                    </option>
+                                <?php endif; ?>
+                            </select>
                         </div>
 
                         <!-- Status -->
@@ -179,7 +287,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                             <div class="d-flex justify-content-between align-items-center">
                                 <div>
                                     <button type="button" class="btn btn-primary" id="updateFingerprintsBtn"
-                                            onclick="openFingerprintModal(<?php echo $student['id']; ?>, '<?php echo htmlspecialchars($student['first_name'] . ' ' . $student['last_name']); ?>')">
+                                            onclick="openFingerprintModal(<?php echo $student['id']; ?>, '<?php echo htmlspecialchars(formatStudentDisplayName($student)); ?>')">
                                         <i class="bi bi-fingerprint"></i> Update Fingerprints
                                     </button>
                                     
@@ -200,8 +308,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                                     </div>
                                 </div>
                                 <div class="d-flex gap-2">
-                                    <button type="submit" class="btn  btn-success">
-                                        <i class="bi bi-check-lg"></i> Update Student
+                                    <button type="submit" class="btn btn-primary px-4 fw-semibold" id="doneStudentBtn">
+                                        <i class="bi bi-check2-circle"></i> Done
                                     </button>
                                 </div>
                             </div>
@@ -220,7 +328,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         <div class="modal-content">
             <div class="modal-header">
                 <h5 class="modal-title"><i class="bi bi-fingerprint"></i> Update Fingerprints</h5>
-                <span id="modalModeBadge" class="badge bg-success me-2">Mode: Attendance</span>
                 <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
             </div>
             <div class="modal-body p-4">
@@ -260,57 +367,44 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
                 <!-- Step 2: Enrollment Progress -->
                 <div id="step2EnrollmentProgress" style="display: none;">
-                    <div class="enrollment-header mb-4">
-                        <h5 id="currentFingerTitle">Enrolling Finger 1 of 1</h5>
+                    <div class="text-center mb-4">
+                        <h4 id="currentFingerTitle">Finger 1 of 1</h4>
+                        <p class="text-muted mb-2" id="scanStepStatus">Scanning finger 1 - 1 of 3</p>
+                        <div class="scan-step-indicators mb-2" id="scanStepIndicators"></div>
                         <p class="text-muted mb-0">Place your finger on the scanner and wait for confirmation.</p>
                     </div>
 
-                    <div id="scanProgress" class="mb-4">
-                        <div class="scan-attempts">
-                            <div class="scan-attempt" id="scan1">
-                                <div class="scan-circle"><i class="bi bi-fingerprint"></i></div>
-                                <small>Scan 1</small>
-                            </div>
-                            <div class="scan-attempt" id="scan2">
-                                <div class="scan-circle"><i class="bi bi-fingerprint"></i></div>
-                                <small>Scan 2</small>
-                            </div>
-                            <div class="scan-attempt" id="scan3">
-                                <div class="scan-circle"><i class="bi bi-fingerprint"></i></div>
-                                <small>Scan 3</small>
-                            </div>
-                            <div class="scan-attempt" id="scan4">
-                                <div class="scan-circle"><i class="bi bi-fingerprint"></i></div>
-                                <small>Scan 4</small>
-                            </div>
-                            <div class="scan-attempt" id="scan5">
-                                <div class="scan-circle"><i class="bi bi-fingerprint"></i></div>
-                                <small>Scan 5</small>
+                    <div class="d-flex justify-content-center gap-3 flex-wrap mb-4" id="scanCirclesContainer"></div>
+
+                    <div class="mb-3">
+                        <div class="progress" style="height: 10px;">
+                            <div id="enrollProgressBar" class="progress-bar bg-success" role="progressbar" style="width: 0%"></div>
+                        </div>
+                        <small class="text-muted" id="enrollProgressText">Progress: 0%</small>
+                    </div>
+
+                    <div class="alert alert-info mb-4" id="statusMessage">
+                        <div class="d-flex align-items-center">
+                            <div class="spinner-border spinner-border-sm me-2" role="status"></div>
+                            <div>
+                                <strong>Waiting for scanner</strong><br>
+                                <small id="statusText">Waiting for scan...</small>
                             </div>
                         </div>
                     </div>
 
-                    <div class="alert alert-info" id="statusMessage">
-                        <i class="bi bi-info-circle"></i> <span id="statusText">Waiting for scanner...</span>
-                    </div>
-
-                    <div class="alert alert-secondary mt-2" id="debugMessage" style="display:none;">
+                    <div class="alert alert-secondary mb-4" id="debugMessage" style="display:none;">
                         <strong>Debug Log</strong>
                         <div id="debugText" style="font-family: monospace; font-size: 0.85rem; white-space: pre-wrap;"></div>
                     </div>
 
-                    <div class="d-flex gap-2 justify-content-between">
+                    <div class="d-flex justify-content-between">
                         <button type="button" class="btn btn-secondary" id="btnCancelEnrollment">
                             <i class="bi bi-x-circle"></i> Cancel
                         </button>
-                        <div class="d-flex gap-2">
-                            <button type="button" class="btn btn-warning" id="btnRetryFinger" style="display: none;">
-                                <i class="bi bi-arrow-clockwise"></i> Retry This Finger
-                            </button>
-                            <button type="button" class="btn btn-primary" id="btnNextFinger" style="display: none;">
-                                <i class="bi bi-arrow-right"></i> Next Finger
-                            </button>
-                        </div>
+                        <button type="button" class="btn btn-outline-danger" id="btnRetryEnrollment" style="display:none;">
+                            <i class="bi bi-arrow-clockwise"></i> Retry Enrollment
+                        </button>
                     </div>
                 </div>
 
@@ -445,6 +539,38 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     border-bottom: 1px solid #e5e7eb;
     padding-bottom: 15px;
 }
+
+.scan-step-indicators {
+    display: flex;
+    justify-content: center;
+    gap: 8px;
+}
+
+.scan-step {
+    width: 30px;
+    height: 30px;
+    border-radius: 999px;
+    border: 2px solid #d1d5db;
+    color: #6b7280;
+    font-size: 0.85rem;
+    font-weight: 700;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    background: #fff;
+}
+
+.scan-step.active {
+    border-color: #3b82f6;
+    color: #1d4ed8;
+    background: #dbeafe;
+}
+
+.scan-step.done {
+    border-color: #10b981;
+    color: #047857;
+    background: #d1fae5;
+}
 </style>
 
 <script>
@@ -455,30 +581,34 @@ let updateState = {
     studentName: '',
     numFingers: 0,
     currentFinger: 1,
-    currentScan: 1,
     enrolledFingerprints: [],
     fingerprintsChanged: false,
     sessionId: null,
-    debugLines: []
+    debugLines: [],
     registrationId: null,
     monitorHandle: null,
     lastServerFinger: 1,
-    enrollmentCompleted: false
+    enrollmentCompleted: false,
+    pollFailures: 0,
+    scanStepsPerFinger: 3,
+    currentScanStep: 1,
+    lastProgressSnapshot: ''
 };
 
 // Initialize modal when page loads
 document.addEventListener('DOMContentLoaded', function() {
     updateState.modal = new bootstrap.Modal(document.getElementById('fingerprintModal'));
     updateModeIndicator('attendance');
+    renderScanCircles(1);
     
     // Finger selection buttons
     document.querySelectorAll('.finger-btn').forEach(btn => {
         btn.addEventListener('click', function() {
             document.querySelectorAll('.finger-btn').forEach(b => b.classList.remove('selected'));
             this.classList.add('selected');
-            updateState.numFingers = parseInt(this.dataset.fingers);
+            updateState.numFingers = parseInt(this.dataset.fingers, 10);
             
-            setTimeout(() => startEnrollment(), 500);
+            setTimeout(() => startEnrollment(), 250);
         });
     });
     
@@ -489,6 +619,13 @@ document.addEventListener('DOMContentLoaded', function() {
         resetModal();
         updateState.modal.hide();
     });
+
+    const retryEnrollmentBtn = document.getElementById('btnRetryEnrollment');
+    if (retryEnrollmentBtn) {
+        retryEnrollmentBtn.addEventListener('click', function () {
+            setTimeout(() => startEnrollment(), 200);
+        });
+    }
 
     document.getElementById('fingerprintModal').addEventListener('shown.bs.modal', function() {
         setScannerMode('registration');
@@ -547,37 +684,105 @@ function updateModeIndicator(mode) {
     }
 
     if (mode === 'registration') {
-        badge.className = 'badge bg-warning text-dark me-2';
-        badge.textContent = 'Mode: Registration (Busy)';
+        badge.className = 'd-none';
+        badge.textContent = '';
         return;
     }
 
-    badge.className = 'badge bg-success me-2';
-    badge.textContent = 'Mode: Attendance';
+    badge.className = 'd-none';
+    badge.textContent = '';
+}
+
+function renderScanCircles(totalFingers) {
+    const container = document.getElementById('scanCirclesContainer');
+    if (!container) {
+        return;
+    }
+
+    const safeTotal = Math.max(1, parseInt(totalFingers || 1, 10));
+    let html = '';
+
+    for (let i = 1; i <= safeTotal; i++) {
+        html += `<div class="scan-circle" id="scan${i}" data-finger="${i}"><i class="bi bi-fingerprint"></i></div>`;
+    }
+
+    container.innerHTML = html;
+}
+
+function updateScanStepIndicators() {
+    const container = document.getElementById('scanStepIndicators');
+    if (!container) {
+        return;
+    }
+
+    let html = '';
+    for (let i = 1; i <= updateState.scanStepsPerFinger; i++) {
+        let cls = 'scan-step';
+        if (i < updateState.currentScanStep) {
+            cls += ' done';
+        } else if (i === updateState.currentScanStep) {
+            cls += ' active';
+        }
+        html += `<span class="${cls}">${i}</span>`;
+    }
+
+    container.innerHTML = html;
+}
+
+function formatEnrollmentUiError(message) {
+    const raw = String(message || '').trim();
+    const lower = raw.toLowerCase();
+
+    if (!raw) {
+        return 'Fingerprint scanning error. Please try again.';
+    }
+
+    // Keep scanner internals in debug log only.
+    if (
+        lower.includes('getimage') ||
+        lower.includes('image2tz') ||
+        lower.includes('createmodel') ||
+        lower.includes('storemodel') ||
+        lower.includes('remove finger timeout') ||
+        lower.includes('scanner enrollment failed') ||
+        lower.includes('code=')
+    ) {
+        return 'Fingerprint scanning error. Please place your finger properly and try again.';
+    }
+
+    return raw;
 }
 
 function startEnrollment() {
     document.getElementById('step1SelectFingers').style.display = 'none';
     document.getElementById('step2EnrollmentProgress').style.display = 'block';
+    document.getElementById('step3Complete').style.display = 'none';
     
     updateState.currentFinger = 1;
-    updateState.currentScan = 1;
     updateState.enrolledFingerprints = [];
+    updateState.pollFailures = 0;
+    updateState.lastServerFinger = 1;
+    updateState.registrationId = null;
     appendDebug('Starting fingerprint update for student_id=' + String(updateState.studentId));
+
+    renderScanCircles(updateState.numFingers);
+    updateProgress();
     
     checkScannerOnline(true).then((isOnline) => {
         if (!isOnline) {
-            showWaitingMessage('Scanner heartbeat is stale. Starting registration mode anyway...');
+            showError('Scanner offline. Retry when scanner is online.');
+            return null;
         }
 
-        showWaitingMessage('Starting registration mode...');
-        appendDebug('Calling start_registration API');
-        return fetch('../api/start_registration.php', {
+        showWaitingMessage('Sending registration command to scanner...');
+        appendDebug('Calling register API (start action)');
+        return fetch('../api/register.php', {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json'
             },
             body: JSON.stringify({
+                action: 'start',
                 student_id: updateState.studentId,
                 total_fingers: updateState.numFingers
             })
@@ -592,14 +797,32 @@ function startEnrollment() {
         appendDebug('start_registration response', data);
 
         if (!data.success) {
-            showError('Failed to initialize enrollment: ' + data.message);
+            const rawError = data.message || 'Failed to initialize enrollment.';
+            const uiError = formatEnrollmentUiError(rawError);
+            appendDebug('Enrollment start failed', {
+                raw_error: rawError,
+                ui_error: uiError,
+                response: data
+            });
+            showError(uiError);
             return;
         }
 
-        updateState.registrationId = data.registration_id;
-        updateState.lastServerFinger = 1;
+        const registrationId = parseInt(data.registration_id || 0, 10);
+        if (!registrationId) {
+            showError('Scanner did not return a valid registration session.');
+            return;
+        }
+
+        updateState.registrationId = registrationId;
+        updateState.lastServerFinger = Math.max(1, parseInt(data.finger_number || 1, 10));
+        if (data.total_fingers) {
+            updateState.numFingers = Math.max(1, parseInt(data.total_fingers, 10));
+        }
         updateState.currentFinger = 1;
         updateState.enrollmentCompleted = false;
+        updateState.currentScanStep = 1;
+        showWaitingMessage('Command queued. Place your finger on the scanner.');
         updateProgress();
         beginEnrollmentMonitor();
     })
@@ -613,38 +836,95 @@ function beginEnrollmentMonitor() {
         clearInterval(updateState.monitorHandle);
     }
 
-    showWaitingMessage();
+    if (!updateState.registrationId) {
+        showError('Missing registration session. Please retry enrollment.');
+        return;
+    }
+
+    showWaitingMessage('Waiting for scanner to process enrollment command...');
     appendDebug('Polling get_mode for registration progress');
 
     updateState.monitorHandle = setInterval(async () => {
         try {
-            const response = await fetch('../api/get_mode.php');
+            const response = await fetch(`../api/get_mode.php?registration_id=${encodeURIComponent(String(updateState.registrationId || ''))}`);
             const data = await response.json();
-            appendDebug('get_mode response', data);
 
             if (!data.success) {
+                updateState.pollFailures += 1;
+                if (updateState.pollFailures >= 3) {
+                    showError('Unable to read scanner mode. Check server connection and try again.');
+                }
                 return;
+            }
+
+            updateState.pollFailures = 0;
+
+            if (data.total_fingers) {
+                updateState.numFingers = Math.max(1, parseInt(data.total_fingers, 10));
+            }
+
+            if (data.registration_id) {
+                const activeRegistrationId = String(data.registration_id);
+                if (activeRegistrationId !== String(updateState.registrationId || '')) {
+                    appendDebug('Active registration command changed to id=' + activeRegistrationId);
+                    updateState.registrationId = activeRegistrationId;
+                }
             }
 
             if (data.mode === 'registration' && String(data.registration_id || '') === String(updateState.registrationId || '')) {
                 const serverFinger = Math.max(1, parseInt(data.finger_number || 1, 10));
+                const serverScanStep = parseInt(data.scan_step || 0, 10);
+                const totalScanSteps = parseInt(data.total_scan_steps || 3, 10);
+
+                const snapshot = `${String(data.mode)}:${serverFinger}:${serverScanStep}:${String(data.last_sensor_id || '')}`;
+                if (snapshot !== updateState.lastProgressSnapshot) {
+                    updateState.lastProgressSnapshot = snapshot;
+                    appendDebug('Registration status changed', {
+                        finger_number: serverFinger,
+                        total_fingers: updateState.numFingers,
+                        scan_step: serverScanStep,
+                        total_scan_steps: totalScanSteps,
+                        last_sensor_id: data.last_sensor_id || null
+                    });
+                }
 
                 if (serverFinger > updateState.lastServerFinger) {
-                    while (updateState.lastServerFinger < serverFinger && updateState.lastServerFinger <= updateState.numFingers) {
-                        markFingerCompleted(updateState.lastServerFinger);
-                        updateState.lastServerFinger++;
+                    markFingerCompleted(updateState.lastServerFinger);
+                    updateState.lastServerFinger = serverFinger;
+                    if (data.last_sensor_id) {
+                        showWaitingMessage(`Registered (ID: ${data.last_sensor_id})`);
                     }
                 }
 
                 updateState.currentFinger = Math.min(serverFinger, updateState.numFingers);
+                if (serverScanStep > 0) {
+                    updateState.currentScanStep = serverScanStep;
+                    updateState.scanStepsPerFinger = totalScanSteps;
+                }
                 updateProgress();
-                showWaitingMessage();
+                return;
+            }
+
+            if (data.mode === 'failed') {
+                const rawError = data.message || 'Enrollment failed on scanner. Please retry enrollment.';
+                const uiError = formatEnrollmentUiError(rawError);
+
+                appendDebug('Device reported enrollment failure', {
+                    raw_error: rawError,
+                    ui_error: uiError,
+                    response: data
+                });
+
+                showError(uiError);
                 return;
             }
 
             if (data.mode === 'attendance' && updateState.registrationId) {
                 if (updateState.lastServerFinger <= updateState.numFingers) {
                     markFingerCompleted(updateState.lastServerFinger);
+                }
+                if (data.last_sensor_id) {
+                    showWaitingMessage(`Registered (ID: ${data.last_sensor_id})`);
                 }
                 appendDebug('Mode switched to attendance; registration complete path reached');
                 showCompletion();
@@ -657,31 +937,70 @@ function beginEnrollmentMonitor() {
 }
 
 function markFingerCompleted(fingerNo) {
-    document.querySelectorAll('.scan-circle').forEach(circle => {
+    if (fingerNo < 1 || fingerNo > updateState.numFingers) {
+        return;
+    }
+
+    const circle = document.getElementById(`scan${fingerNo}`);
+    if (circle) {
         circle.classList.remove('scanning', 'error');
         circle.classList.add('success');
-        circle.innerHTML = '<i class="bi bi-check"></i>';
-    });
+        circle.innerHTML = '<i class="bi bi-check-lg"></i>';
+    }
 
     if (!updateState.enrolledFingerprints.find(f => f.finger === fingerNo)) {
         updateState.enrolledFingerprints.push({ finger: fingerNo, scans: 1 });
     }
+
+    updateOverallProgress();
 }
 
 function updateProgress() {
     document.getElementById('currentFingerTitle').textContent = 
-        `Enrolling Finger ${updateState.currentFinger} of ${updateState.numFingers}`;
-    
-    // Reset scan circles
+        `Finger ${updateState.currentFinger} of ${updateState.numFingers}`;
+
+    const scanStepStatus = document.getElementById('scanStepStatus');
+    if (scanStepStatus) {
+        scanStepStatus.textContent = `Scanning finger ${updateState.currentFinger} - ${updateState.currentScanStep} of ${updateState.scanStepsPerFinger}`;
+    }
+
+    updateScanStepIndicators();
+
     document.querySelectorAll('.scan-circle').forEach(circle => {
-        circle.classList.remove('scanning', 'success');
+        if (!circle.classList.contains('success')) {
+            circle.classList.remove('scanning', 'error');
+            circle.innerHTML = '<i class="bi bi-fingerprint"></i>';
+        }
     });
     
-    // Show current scan as scanning
-    const currentCircle = document.getElementById(`scan${updateState.currentScan}`);
-    if (currentCircle) {
+    const currentCircle = document.getElementById(`scan${updateState.currentFinger}`);
+    if (currentCircle && !currentCircle.classList.contains('success')) {
         currentCircle.classList.add('scanning');
     }
+
+    const statusText = document.getElementById('statusText');
+    if (statusText) {
+        statusText.textContent = `Scanning finger ${updateState.currentFinger} ${updateState.currentScanStep} of ${updateState.scanStepsPerFinger}`;
+    }
+
+    updateOverallProgress();
+}
+
+function updateOverallProgress() {
+    const progressBar = document.getElementById('enrollProgressBar');
+    const progressText = document.getElementById('enrollProgressText');
+
+    if (!progressBar || !progressText) {
+        return;
+    }
+
+    const completed = updateState.enrolledFingerprints.length;
+    const total = Math.max(1, updateState.numFingers || 1);
+    const percent = Math.round((completed / total) * 100);
+
+    progressBar.style.width = `${percent}%`;
+    progressBar.setAttribute('aria-valuenow', String(percent));
+    progressText.textContent = `Progress: ${completed}/${total} fingers (${percent}%)`;
 }
 
 async function checkScannerOnline(showStatus = false) {
@@ -694,19 +1013,20 @@ async function checkScannerOnline(showStatus = false) {
         appendDebug('scanner_status online=' + String(isOnline), data);
 
         if (showStatus && !isOnline) {
+            statusDiv.className = 'alert alert-danger mb-4';
             statusDiv.innerHTML = `
-                <div class="alert alert-danger mb-0">
                     <div class="d-flex align-items-center justify-content-between gap-2 flex-wrap">
-                        <div>
+                        <div class="d-flex align-items-center">
                             <i class="bi bi-wifi-off me-2"></i>
-                            <strong>Scanner Offline</strong><br>
-                            <small>${(data.scanner && data.scanner.message) ? data.scanner.message : 'No recent heartbeat from scanner'}</small>
+                            <div>
+                                <strong>Scanner Offline</strong><br>
+                                <small>${(data.scanner && data.scanner.message) ? data.scanner.message : 'No recent heartbeat from scanner'}</small>
+                            </div>
                         </div>
                         <button type="button" class="btn btn-sm btn-outline-danger" onclick="startEnrollment()">
-                            <i class="bi bi-arrow-clockwise me-1"></i>Retry Check
+                            <i class="bi bi-arrow-clockwise"></i> Retry Check
                         </button>
                     </div>
-                </div>
             `;
         }
 
@@ -714,19 +1034,20 @@ async function checkScannerOnline(showStatus = false) {
     } catch (error) {
         appendDebug('scanner_status error: ' + error.message);
         if (showStatus) {
+            statusDiv.className = 'alert alert-danger mb-4';
             statusDiv.innerHTML = `
-                <div class="alert alert-danger mb-0">
                     <div class="d-flex align-items-center justify-content-between gap-2 flex-wrap">
-                        <div>
+                        <div class="d-flex align-items-center">
                             <i class="bi bi-wifi-off me-2"></i>
-                            <strong>Scanner Offline</strong><br>
-                            <small>Status check failed. Verify scanner and server connection.</small>
+                            <div>
+                                <strong>Scanner Offline</strong><br>
+                                <small>Status check failed. Verify scanner and server connection.</small>
+                            </div>
                         </div>
                         <button type="button" class="btn btn-sm btn-outline-danger" onclick="startEnrollment()">
-                            <i class="bi bi-arrow-clockwise me-1"></i>Retry Check
+                            <i class="bi bi-arrow-clockwise"></i> Retry Check
                         </button>
                     </div>
-                </div>
             `;
         }
 
@@ -734,31 +1055,30 @@ async function checkScannerOnline(showStatus = false) {
     }
 }
 
-function showWaitingMessage() {
+function showWaitingMessage(message) {
     const statusDiv = document.getElementById('statusMessage');
-    statusDiv.innerHTML = `
-        <div class="d-flex align-items-center">
-            <div class="spinner-border spinner-border-sm text-primary me-2" role="status"></div>
-            <div>
-                <strong>Waiting for ESP32 Scanner</strong><br>
-                <small>Enroll finger ${updateState.currentFinger} of ${updateState.numFingers}</small><br>
-                <small class="text-muted">Place the finger on scanner until device confirms save</small>
-            </div>
-        </div>
-    `;
+    const statusText = document.getElementById('statusText');
+
+    if (statusText) {
+        statusText.textContent = message || 'Waiting for scan...';
+    }
+
+    if (statusDiv) {
+        statusDiv.className = 'alert alert-info mb-4';
+    }
 }
 
 function showError(message) {
     const statusDiv = document.getElementById('statusMessage');
+    statusDiv.className = 'alert alert-danger mb-4';
     statusDiv.innerHTML = `
-        <div class="alert alert-danger">
-            <i class="bi bi-exclamation-triangle me-2"></i>
-            ${message}
-            <div class="mt-2">
-                <button type="button" class="btn btn-sm btn-primary" onclick="startEnrollment()">
-                    <i class="bi bi-arrow-clockwise me-1"></i>Retry
-                </button>
+        <div class="d-flex align-items-center justify-content-between gap-2 flex-wrap">
+            <div>
+                <i class="bi bi-exclamation-triangle me-2"></i>${message}
             </div>
+            <button type="button" class="btn btn-sm btn-outline-danger" onclick="startEnrollment()">
+                <i class="bi bi-arrow-clockwise me-1"></i>Retry
+            </button>
         </div>
     `;
     appendDebug('ERROR: ' + message);
@@ -774,14 +1094,10 @@ function resetModal() {
     document.getElementById('step3Complete').style.display = 'none';
     
     document.querySelectorAll('.finger-btn').forEach(b => b.classList.remove('selected'));
-    document.querySelectorAll('.scan-circle').forEach(circle => {
-        circle.classList.remove('scanning', 'success');
-        circle.innerHTML = '<i class="bi bi-fingerprint"></i>';
-    });
+    renderScanCircles(1);
     
     updateState.numFingers = 0;
     updateState.currentFinger = 1;
-    updateState.currentScan = 1;
     updateState.enrolledFingerprints = [];
     updateState.fingerprintsChanged = false;
     updateState.sessionId = null;
@@ -789,7 +1105,13 @@ function resetModal() {
     updateState.monitorHandle = null;
     updateState.lastServerFinger = 1;
     updateState.enrollmentCompleted = false;
+    updateState.pollFailures = 0;
+    updateState.currentScanStep = 1;
+    updateState.lastProgressSnapshot = '';
     updateState.debugLines = [];
+
+    updateOverallProgress();
+    updateScanStepIndicators();
 
     const debugBox = document.getElementById('debugMessage');
     const debugText = document.getElementById('debugText');

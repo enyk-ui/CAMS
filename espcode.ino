@@ -18,6 +18,9 @@
 #define SYSTEM_SUMMARY_INTERVAL 10000
 #define ENROLL_SCAN_STEPS 3
 #define ENROLL_IDLE_COOLDOWN_MS 5000
+#define ATTEND_IDLE_COOLDOWN_MS 2500
+#define ENROLL_CAPTURE_TIMEOUT_MS 25000
+#define ENROLL_REMOVE_TIMEOUT_MS 12000
 
 #define SENSOR_RX_PIN D1
 #define SENSOR_TX_PIN D2
@@ -30,7 +33,7 @@
 #define I2C_SCL_PIN D4
 
 // Update this to your PHP server IP.
-const char* SERVER_HOST = "10.18.239.94";
+const char* SERVER_HOST = "10.224.246.94";
 
 const uint16_t SERVER_PORT = 80;
 const int DEVICE_ID = 1;
@@ -54,6 +57,7 @@ unsigned long lastScanErrorLogMs = 0;
 unsigned long lastServerCheckMs = 0;
 unsigned long lastSystemSummaryMs = 0;
 unsigned long lastEnrollCompleteMs = 0;
+unsigned long lastAttendanceCompleteMs = 0;
 String lcdLine1 = "";
 String lcdLine2 = "";
 bool wifiWasConnected = false;
@@ -61,6 +65,7 @@ bool sensorReady = false;
 bool serverReady = false;
 bool bootReady = false;
 String currentMode = "IDLE";
+String lastEnrollFailureReason = "";
 
 void logInfo(const String& tag, const String& message) {
   Serial.print("[");
@@ -469,6 +474,11 @@ bool waitFingerRemoved(unsigned long timeoutMs) {
   return false;
 }
 
+bool isTransientGetImageError(uint8_t code) {
+  // Packet receive and image acquisition errors are often transient on ESP8266 + sensor wiring.
+  return code == FINGERPRINT_PACKETRECIEVEERR || code == FINGERPRINT_IMAGEFAIL;
+}
+
 void showEnrollStep(int fingerIndex, int stepNo, const String& message) {
   String line1 = "Scanning F" + String(fingerIndex);
   String line2 = String(stepNo) + " of " + String(ENROLL_SCAN_STEPS);
@@ -484,6 +494,7 @@ void showEnrollStep(int fingerIndex, int stepNo, const String& message) {
 bool enrollFinger(int sensorId, int fingerIndex, int studentId) {
   Serial.print("[ENROLL] Start ID=");
   Serial.println(sensorId);
+  lastEnrollFailureReason = "";
 
   uint8_t p;
   unsigned long start;
@@ -494,23 +505,33 @@ bool enrollFinger(int sensorId, int fingerIndex, int studentId) {
   // Step 1: getImage() + image2Tz(1)
   showEnrollStep(fingerIndex, 1, "");
   start = millis();
+  int step1TransientErrors = 0;
   do {
     p = finger.getImage();
     if (p == FINGERPRINT_OK) {
       break;
     }
-    if (p != FINGERPRINT_NOFINGER) {
+    if (p != FINGERPRINT_NOFINGER && !isTransientGetImageError(p)) {
       Serial.print("[ENROLL] getImage #1 failed: ");
       Serial.println(p);
+      lastEnrollFailureReason = "getImage#1 code=" + String((int)p);
       displayLCD("Not Found", "Try Again");
       return false;
     }
+    if (p != FINGERPRINT_NOFINGER) {
+      step1TransientErrors++;
+      if (step1TransientErrors <= 3 || step1TransientErrors % 10 == 0) {
+        Serial.print("[ENROLL] getImage #1 transient: ");
+        Serial.println(p);
+      }
+    }
     delay(20);
     yield();
-  } while (millis() - start < 15000);
+  } while (millis() - start < ENROLL_CAPTURE_TIMEOUT_MS);
 
   if (p != FINGERPRINT_OK) {
     Serial.println("[ENROLL] getImage #1 timeout");
+    lastEnrollFailureReason = "getImage#1 timeout";
     displayLCD("Not Found", "Try Again");
     return false;
   }
@@ -519,14 +540,28 @@ bool enrollFinger(int sensorId, int fingerIndex, int studentId) {
   if (p != FINGERPRINT_OK) {
     Serial.print("[ENROLL] image2Tz(1) failed: ");
     Serial.println(p);
+    lastEnrollFailureReason = "image2Tz#1 code=" + String((int)p);
     displayLCD("Not Found", "Try Again");
     return false;
+  }
+
+  // For finger 2+, reject a finger that is already enrolled in sensor memory.
+  // This prevents using the same physical finger for multiple finger slots.
+  if (fingerIndex > 1) {
+    p = finger.fingerFastSearch();
+    if (p == FINGERPRINT_OK) {
+      lastEnrollFailureReason = "duplicate finger detected sensor_id=" + String((int)finger.fingerID);
+      Serial.print("[ENROLL] Duplicate finger detected at sensor_id=");
+      Serial.println(finger.fingerID);
+      displayLCD("Duplicate finger", "Use other finger");
+      return false;
+    }
   }
 
   // Wait for finger removal.
   showEnrollStep(fingerIndex, 1, "Remove");
   start = millis();
-  while (millis() - start < 8000) {
+  while (millis() - start < ENROLL_REMOVE_TIMEOUT_MS) {
     p = finger.getImage();
     if (p == FINGERPRINT_NOFINGER) {
       break;
@@ -537,6 +572,7 @@ bool enrollFinger(int sensorId, int fingerIndex, int studentId) {
 
   if (p != FINGERPRINT_NOFINGER) {
     Serial.println("[ENROLL] remove finger timeout");
+    lastEnrollFailureReason = "remove finger timeout";
     displayLCD("Not Found", "Try Again");
     return false;
   }
@@ -547,23 +583,34 @@ bool enrollFinger(int sensorId, int fingerIndex, int studentId) {
   // Step 2: getImage() + image2Tz(2)
   showEnrollStep(fingerIndex, 2, "");
   start = millis();
+  int step2TransientErrors = 0;
   do {
     p = finger.getImage();
     if (p == FINGERPRINT_OK) {
       break;
     }
-    if (p != FINGERPRINT_NOFINGER) {
+    if (p != FINGERPRINT_NOFINGER && !isTransientGetImageError(p)) {
       Serial.print("[ENROLL] getImage #2 failed: ");
       Serial.println(p);
+      lastEnrollFailureReason = "getImage#2 code=" + String((int)p);
       displayLCD("Not Found", "Try Again");
       return false;
     }
+    
+    if (p != FINGERPRINT_NOFINGER) {
+      step2TransientErrors++;
+      if (step2TransientErrors <= 3 || step2TransientErrors % 10 == 0) {
+        Serial.print("[ENROLL] getImage #2 transient: ");
+        Serial.println(p);
+      }
+    }
     delay(20);
     yield();
-  } while (millis() - start < 15000);
+  } while (millis() - start < ENROLL_CAPTURE_TIMEOUT_MS);
 
   if (p != FINGERPRINT_OK) {
     Serial.println("[ENROLL] getImage #2 timeout");
+    lastEnrollFailureReason = "getImage#2 timeout";
     displayLCD("Not Found", "Try Again");
     return false;
   }
@@ -572,6 +619,7 @@ bool enrollFinger(int sensorId, int fingerIndex, int studentId) {
   if (p != FINGERPRINT_OK) {
     Serial.print("[ENROLL] image2Tz(2) failed: ");
     Serial.println(p);
+    lastEnrollFailureReason = "image2Tz#2 code=" + String((int)p);
     displayLCD("Not Found", "Try Again");
     return false;
   }
@@ -579,12 +627,20 @@ bool enrollFinger(int sensorId, int fingerIndex, int studentId) {
   // Report scan step 3 to server
   reportScanProgress(studentId, fingerIndex, 3, ENROLL_SCAN_STEPS);
 
+  // Keep step 3 visible briefly so web polling can render "3 of 3" before finalize.
+  unsigned long step3HoldStart = millis();
+  while (millis() - step3HoldStart < 900) {
+    delay(20);
+    yield();
+  }
+
   // Step 3: createModel()
   showEnrollStep(fingerIndex, 3, "Save");
   p = finger.createModel();
   if (p != FINGERPRINT_OK) {
     Serial.print("[ENROLL] createModel failed: ");
     Serial.println(p);
+    lastEnrollFailureReason = "createModel code=" + String((int)p);
     displayLCD("Not Found", "Try Again");
     return false;
   }
@@ -594,6 +650,7 @@ bool enrollFinger(int sensorId, int fingerIndex, int studentId) {
   if (p != FINGERPRINT_OK) {
     Serial.print("[ENROLL] storeModel failed: ");
     Serial.println(p);
+    lastEnrollFailureReason = "storeModel code=" + String((int)p);
     displayLCD("Not Found", "Try Again");
     return false;
   }
@@ -631,6 +688,35 @@ bool sendEnrollResult(int studentId, int fingerIndex, int sensorId) {
 
   bool ok = resp["success"] | false;
   Serial.print("[ENROLL] Result POST success=");
+  Serial.println(ok ? "true" : "false");
+  return ok;
+}
+
+bool sendEnrollFailure(int studentId, int fingerIndex, const String& reason) {
+  StaticJsonDocument<256> doc;
+  doc["student_id"] = studentId;
+  doc["finger_index"] = fingerIndex;
+  doc["success"] = false;
+  doc["error_message"] = reason;
+
+  String payload;
+  serializeJson(doc, payload);
+
+  String body;
+  Serial.println("[ENROLL] Posting enroll failure to server...");
+  if (!httpPostJson(String(API_BASE_PATH) + "/enroll-result.php", payload, body)) {
+    Serial.println("[ENROLL] POST enroll-result (failure) failed");
+    return false;
+  }
+
+  StaticJsonDocument<256> resp;
+  if (deserializeJson(resp, body)) {
+    Serial.println("[ENROLL] Failure response parse failed");
+    return false;
+  }
+
+  bool ok = resp["success"] | false;
+  Serial.print("[ENROLL] Failure POST success=");
   Serial.println(ok ? "true" : "false");
   return ok;
 }
@@ -932,18 +1018,20 @@ void loop() {
     int enrollFingerIndex = cmd.fingerIndex > 0 ? cmd.fingerIndex : 1;
     bool enrolled = enrollFinger(sensorId, enrollFingerIndex, cmd.studentId);
     if (!enrolled) {
+      String reason = lastEnrollFailureReason.length() > 0
+        ? lastEnrollFailureReason
+        : "Scanner enrollment failed (image/model/store)";
+      sendEnrollFailure(cmd.studentId, enrollFingerIndex, reason);
       displayLCD("Not Found", "Try Again");
       return;
     }
 
-    bool posted = sendEnrollResult(cmd.studentId, cmd.fingerIndex, sensorId);
+    bool posted = sendEnrollResult(cmd.studentId, enrollFingerIndex, sensorId);
     if (posted) {
       lastEnrollCompleteMs = millis();
       displayLCD("Saved!", "ID:" + String(sensorId));
 
-      // Signal the server to advance to the next finger (or IDLE if all done).
-      // This ensures the UI only advances AFTER the device finishes all 3 scans.
-      advanceToNextFinger(cmd.studentId, cmd.fingerIndex);
+       advanceToNextFinger(cmd.studentId, enrollFingerIndex);
     } else {
       displayLCD("Not Found", "Try Again");
     }
@@ -984,10 +1072,14 @@ void loop() {
     return;
   }
 
-  // IDLE mode: wait for scan and send attendance on match.
-  if (currentMode == "IDLE") {
+   if (currentMode == "IDLE") {
     if (lastEnrollCompleteMs > 0 && (millis() - lastEnrollCompleteMs) < ENROLL_IDLE_COOLDOWN_MS) {
       displayLCD("Enroll done", "Wait finger...");
+      return;
+    }
+
+    if (lastAttendanceCompleteMs > 0 && (millis() - lastAttendanceCompleteMs) < ATTEND_IDLE_COOLDOWN_MS) {
+      displayLCD("Attendance saved", "Remove finger");
       return;
     }
 
@@ -1042,5 +1134,9 @@ void loop() {
   int matchedId = finger.fingerID;
   Serial.print("[IDLE] Match sensor_id=");
   Serial.println(matchedId);
-  sendAttendance(matchedId);
+  if (sendAttendance(matchedId)) {
+    lastAttendanceCompleteMs = millis();
+    // Avoid duplicate reads while the finger is still on the sensor.
+    waitFingerRemoved(4000);
+  }
 }

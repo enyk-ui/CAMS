@@ -3,7 +3,7 @@
 -- https://www.phpmyadmin.net/
 --
 -- Host: 127.0.0.1
--- Generation Time: Apr 08, 2026
+-- Generation Time: Apr 09, 2026 at 09:16 AM
 -- Server version: 10.4.32-MariaDB
 -- PHP Version: 8.2.12
 
@@ -47,71 +47,7 @@ INSERT INTO `admins` (`id`, `email`, `password`, `full_name`, `status`, `created
 -- --------------------------------------------------------
 
 --
--- Table structure for table `devices`
---
-
-CREATE TABLE `devices` (
-  `id` int(11) NOT NULL,
-  `device_key` varchar(50) NOT NULL,
-  `name` varchar(100) DEFAULT NULL,
-  `location` varchar(100) DEFAULT NULL,
-  `is_active` tinyint(1) DEFAULT 1,
-  `last_seen` timestamp NULL DEFAULT NULL,
-  `created_at` timestamp NOT NULL DEFAULT current_timestamp()
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
-
--- --------------------------------------------------------
-
---
--- Table structure for table `device_commands`
---
-
-CREATE TABLE `device_commands` (
-  `id` int(11) NOT NULL,
-  `device_id` int(11) NOT NULL,
-  `mode` enum('IDLE','ENROLL','DELETE') DEFAULT 'IDLE',
-  `user_id` int(11) DEFAULT NULL,
-  `finger_index` tinyint(4) DEFAULT NULL,
-  `sensor_id` int(11) DEFAULT NULL,
-  `status` enum('PENDING','IN_PROGRESS','COMPLETED','FAILED') DEFAULT 'PENDING',
-  `error_message` varchar(255) DEFAULT NULL,
-  `created_at` timestamp NOT NULL DEFAULT current_timestamp(),
-  `updated_at` timestamp NOT NULL DEFAULT current_timestamp() ON UPDATE current_timestamp()
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
-
--- --------------------------------------------------------
-
---
--- Table structure for table `fingerprints`
---
-
-CREATE TABLE `fingerprints` (
-  `id` int(11) NOT NULL,
-  `user_id` int(11) NOT NULL,
-  `finger_index` tinyint(4) NOT NULL,
-  `sensor_id` int(11) NOT NULL,
-  `device_id` int(11) NOT NULL,
-  `created_at` timestamp NOT NULL DEFAULT current_timestamp()
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
-
--- --------------------------------------------------------
-
---
--- Table structure for table `attendance_logs`
---
-
-CREATE TABLE `attendance_logs` (
-  `id` int(11) NOT NULL,
-  `user_id` int(11) NOT NULL,
-  `device_id` int(11) NOT NULL,
-  `type` enum('IN','OUT') NOT NULL,
-  `timestamp` timestamp NOT NULL DEFAULT current_timestamp()
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
-
--- --------------------------------------------------------
-
---
--- Table structure for table `attendance` (legacy - for migration)
+-- Table structure for table `attendance`
 --
 
 CREATE TABLE `attendance` (
@@ -131,6 +67,32 @@ CREATE TABLE `attendance` (
 -- --------------------------------------------------------
 
 --
+-- Table structure for table `attendance_logs`
+--
+
+CREATE TABLE `attendance_logs` (
+  `id` int(11) NOT NULL,
+  `student_id` int(11) NOT NULL,
+  `device_id` int(11) NOT NULL,
+  `type` enum('IN','OUT') NOT NULL,
+  `timestamp` timestamp NOT NULL DEFAULT current_timestamp()
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
+
+--
+-- Dumping data for table `attendance_logs`
+--
+
+INSERT INTO `attendance_logs` (`id`, `student_id`, `device_id`, `type`, `timestamp`) VALUES
+(0, 15, 1, 'IN', '2026-04-09 06:17:35'),
+(0, 15, 1, 'OUT', '2026-04-09 06:17:46'),
+(0, 15, 1, 'IN', '2026-04-09 06:18:21'),
+(0, 15, 1, 'OUT', '2026-04-09 06:32:05'),
+(0, 15, 1, 'IN', '2026-04-09 07:08:37'),
+(0, 15, 1, 'OUT', '2026-04-09 07:08:41');
+
+-- --------------------------------------------------------
+
+--
 -- Stand-in structure for view `daily_attendance_summary`
 -- (See below for the actual view)
 --
@@ -142,6 +104,128 @@ CREATE TABLE `daily_attendance_summary` (
 ,`absent_count` decimal(22,0)
 ,`excused_count` decimal(22,0)
 );
+
+-- --------------------------------------------------------
+
+--
+-- Table structure for table `devices`
+--
+
+CREATE TABLE `devices` (
+  `id` int(11) NOT NULL,
+  `device_key` varchar(50) NOT NULL,
+  `name` varchar(100) DEFAULT NULL,
+  `location` varchar(100) DEFAULT NULL,
+  `is_active` tinyint(1) DEFAULT 1,
+  `last_seen` timestamp NULL DEFAULT NULL,
+  `created_at` timestamp NOT NULL DEFAULT current_timestamp()
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
+
+--
+-- Dumping data for table `devices`
+--
+
+INSERT INTO `devices` (`id`, `device_key`, `name`, `location`, `is_active`, `last_seen`, `created_at`) VALUES
+(1, 'CAMS_ESP8266', 'Default Scanner', NULL, 1, NULL, '2026-04-09 04:33:10');
+
+-- --------------------------------------------------------
+
+--
+-- Table structure for table `device_commands`
+--
+
+CREATE TABLE `device_commands` (
+  `id` bigint(20) UNSIGNED NOT NULL,
+  `device_id` int(11) NOT NULL,
+  `mode` enum('IDLE','ENROLL','DELETE') DEFAULT 'IDLE',
+  `student_id` int(11) DEFAULT NULL,
+  `finger_index` tinyint(4) DEFAULT NULL,
+  `sensor_id` int(11) DEFAULT NULL,
+  `scan_step` tinyint(3) UNSIGNED DEFAULT NULL,
+  `total_scan_steps` tinyint(3) UNSIGNED DEFAULT 3,
+  `status` enum('PENDING','IN_PROGRESS','COMPLETED','FAILED') DEFAULT 'PENDING',
+  `error_message` varchar(255) DEFAULT NULL,
+  `created_at` timestamp NOT NULL DEFAULT current_timestamp(),
+  `updated_at` timestamp NOT NULL DEFAULT current_timestamp() ON UPDATE current_timestamp()
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
+
+--
+-- Dumping data for table `device_commands`
+--
+
+INSERT INTO `device_commands` (`id`, `device_id`, `mode`, `student_id`, `finger_index`, `sensor_id`, `scan_step`, `total_scan_steps`, `status`, `error_message`, `created_at`, `updated_at`) VALUES
+(1, 1, 'ENROLL', 6, 1, NULL, NULL, 3, 'FAILED', 'Superseded by new enrollment session', '2026-04-09 05:02:06', '2026-04-09 05:42:57'),
+(2, 1, 'ENROLL', 7, 1, NULL, NULL, 3, 'FAILED', 'Superseded by new enrollment session', '2026-04-09 05:16:44', '2026-04-09 05:42:57'),
+(3, 1, 'ENROLL', 8, 1, NULL, NULL, 3, 'FAILED', 'Superseded by new enrollment session', '2026-04-09 05:19:33', '2026-04-09 05:42:57'),
+(4, 1, 'ENROLL', 9, 1, NULL, NULL, 3, 'FAILED', 'Superseded by new enrollment session', '2026-04-09 05:21:29', '2026-04-09 05:42:57'),
+(5, 1, 'ENROLL', 10, 1, NULL, NULL, 3, 'FAILED', 'Registration cancelled by admin', '2026-04-09 05:22:00', '2026-04-09 05:35:38'),
+(6, 1, 'ENROLL', 11, 1, NULL, NULL, 3, 'FAILED', 'Superseded by new enrollment session', '2026-04-09 05:35:56', '2026-04-09 05:42:57'),
+(7, 1, 'ENROLL', 1, 1, NULL, NULL, 3, 'FAILED', 'Scanner enrollment failed (image/model/store)', '2026-04-09 05:42:57', '2026-04-09 05:43:20'),
+(8, 1, 'ENROLL', 12, 1, 13, NULL, 3, 'COMPLETED', 'total_fingers:2', '2026-04-09 05:50:04', '2026-04-09 05:50:29'),
+(9, 1, 'ENROLL', 12, 2, NULL, NULL, 3, 'FAILED', 'Scanner enrollment failed (image/model/store)', '2026-04-09 05:50:29', '2026-04-09 05:50:38'),
+(10, 1, 'ENROLL', 13, 1, NULL, 1, 3, 'FAILED', 'Scanner enrollment failed (image/model/store)', '2026-04-09 06:03:08', '2026-04-09 06:03:09'),
+(11, 1, 'ENROLL', 13, 1, NULL, 1, 3, 'FAILED', 'Scanner enrollment failed (image/model/store)', '2026-04-09 06:03:15', '2026-04-09 06:03:31'),
+(12, 1, 'ENROLL', 14, 1, NULL, 1, 3, 'FAILED', 'Scanner enrollment failed (image/model/store)', '2026-04-09 06:10:06', '2026-04-09 06:10:22'),
+(13, 1, 'ENROLL', 14, 1, NULL, NULL, 3, 'FAILED', 'Superseded by new enrollment session', '2026-04-09 06:10:26', '2026-04-09 06:10:27'),
+(14, 1, 'ENROLL', 14, 1, NULL, NULL, 3, 'FAILED', 'Superseded by new enrollment session', '2026-04-09 06:10:27', '2026-04-09 06:10:27'),
+(15, 1, 'ENROLL', 14, 1, NULL, 1, 3, 'FAILED', 'Superseded by new enrollment session', '2026-04-09 06:10:27', '2026-04-09 06:10:33'),
+(16, 1, 'ENROLL', 14, 1, NULL, NULL, 3, 'FAILED', 'Superseded by new enrollment session', '2026-04-09 06:10:33', '2026-04-09 06:10:33'),
+(17, 1, 'ENROLL', 14, 1, NULL, NULL, 3, 'FAILED', 'Scanner enrollment failed (image/model/store)', '2026-04-09 06:10:33', '2026-04-09 06:10:43'),
+(18, 1, 'ENROLL', 15, 1, 19, 3, 3, 'COMPLETED', 'total_fingers:2', '2026-04-09 06:14:41', '2026-04-09 06:14:56'),
+(19, 1, 'ENROLL', 15, 2, 20, 3, 3, 'COMPLETED', 'total_fingers:2', '2026-04-09 06:14:56', '2026-04-09 06:15:06'),
+(20, 1, 'IDLE', NULL, NULL, NULL, NULL, 3, 'PENDING', NULL, '2026-04-09 06:15:07', '2026-04-09 06:15:07'),
+(21, 1, 'ENROLL', 16, 1, NULL, 1, 3, 'FAILED', 'getImage#1 timeout', '2026-04-09 06:23:41', '2026-04-09 06:23:58'),
+(22, 1, 'ENROLL', 16, 1, NULL, NULL, 3, 'FAILED', 'Superseded by new enrollment session', '2026-04-09 06:25:23', '2026-04-09 06:25:25'),
+(23, 1, 'ENROLL', 16, 1, NULL, NULL, 3, 'FAILED', 'Superseded by new enrollment session', '2026-04-09 06:25:25', '2026-04-09 06:25:28'),
+(24, 1, 'ENROLL', 16, 1, NULL, NULL, 3, 'FAILED', 'Superseded by new enrollment session', '2026-04-09 06:25:28', '2026-04-09 06:25:29'),
+(25, 1, 'ENROLL', 16, 1, NULL, NULL, 3, 'FAILED', 'Superseded by new enrollment session', '2026-04-09 06:25:29', '2026-04-09 06:25:31'),
+(26, 1, 'ENROLL', 16, 1, NULL, NULL, 3, 'FAILED', 'Superseded by new enrollment session', '2026-04-09 06:25:31', '2026-04-09 06:25:32'),
+(27, 1, 'ENROLL', 16, 1, NULL, NULL, 3, 'FAILED', 'Superseded by new enrollment session', '2026-04-09 06:25:32', '2026-04-09 06:25:33'),
+(28, 1, 'ENROLL', 16, 1, NULL, NULL, 3, 'FAILED', 'Superseded by new enrollment session', '2026-04-09 06:25:33', '2026-04-09 06:25:34'),
+(29, 1, 'ENROLL', 16, 1, NULL, NULL, 3, 'FAILED', 'Superseded by new enrollment session', '2026-04-09 06:25:34', '2026-04-09 06:25:35'),
+(30, 1, 'ENROLL', 16, 1, NULL, NULL, 3, 'FAILED', 'Superseded by new enrollment session', '2026-04-09 06:25:35', '2026-04-09 06:25:35'),
+(31, 1, 'ENROLL', 16, 1, NULL, NULL, 3, 'FAILED', 'Superseded by new enrollment session', '2026-04-09 06:25:35', '2026-04-09 06:25:35'),
+(32, 1, 'ENROLL', 16, 1, NULL, NULL, 3, 'FAILED', 'Mode switched to attendance', '2026-04-09 06:25:35', '2026-04-09 06:25:39'),
+(33, 1, 'ENROLL', 17, 1, NULL, NULL, 3, 'FAILED', 'Superseded by new enrollment session', '2026-04-09 06:25:47', '2026-04-09 06:25:48'),
+(34, 1, 'ENROLL', 17, 1, NULL, NULL, 3, 'FAILED', 'Superseded by new enrollment session', '2026-04-09 06:25:49', '2026-04-09 06:25:49'),
+(35, 1, 'ENROLL', 17, 1, NULL, NULL, 3, 'FAILED', 'Superseded by new enrollment session', '2026-04-09 06:25:49', '2026-04-09 06:25:50'),
+(36, 1, 'ENROLL', 17, 1, NULL, NULL, 3, 'FAILED', 'Superseded by new enrollment session', '2026-04-09 06:25:50', '2026-04-09 06:25:52'),
+(37, 1, 'ENROLL', 17, 1, NULL, NULL, 3, 'FAILED', 'Superseded by new enrollment session', '2026-04-09 06:25:52', '2026-04-09 06:25:58'),
+(38, 1, 'ENROLL', 17, 1, NULL, NULL, 3, 'FAILED', 'Superseded by new enrollment session', '2026-04-09 06:25:53', '2026-04-09 06:25:58'),
+(39, 1, 'ENROLL', 17, 1, NULL, NULL, 3, 'FAILED', 'getImage#1 timeout', '2026-04-09 06:25:59', '2026-04-09 06:26:06'),
+(40, 1, 'ENROLL', 18, 1, NULL, 1, 3, 'FAILED', 'Superseded by new enrollment session', '2026-04-09 06:31:22', '2026-04-09 06:31:24'),
+(41, 1, 'ENROLL', 18, 1, NULL, NULL, 3, 'FAILED', 'Superseded by new enrollment session', '2026-04-09 06:31:24', '2026-04-09 06:31:25'),
+(42, 1, 'ENROLL', 18, 1, NULL, NULL, 3, 'FAILED', 'Superseded by new enrollment session', '2026-04-09 06:31:25', '2026-04-09 06:31:26'),
+(43, 1, 'ENROLL', 18, 1, NULL, NULL, 3, 'FAILED', 'getImage#1 timeout', '2026-04-09 06:31:26', '2026-04-09 06:31:38'),
+(44, 1, 'ENROLL', 18, 1, NULL, 1, 3, 'FAILED', 'getImage#1 timeout', '2026-04-09 06:32:08', '2026-04-09 06:32:28'),
+(45, 1, 'ENROLL', 19, 1, NULL, 1, 3, 'FAILED', 'getImage#1 timeout', '2026-04-09 06:35:43', '2026-04-09 06:36:05'),
+(46, 1, 'ENROLL', 20, 1, NULL, 2, 3, 'FAILED', 'getImage#2 code=1', '2026-04-09 06:39:22', '2026-04-09 06:39:31'),
+(47, 1, 'ENROLL', 20, 1, NULL, NULL, 3, 'FAILED', 'Retry enrollment requested', '2026-04-09 06:44:40', '2026-04-09 06:44:40'),
+(48, 1, 'ENROLL', 20, 1, NULL, NULL, 3, 'FAILED', 'Retry enrollment requested', '2026-04-09 06:44:40', '2026-04-09 06:44:42'),
+(49, 1, 'ENROLL', 20, 1, NULL, NULL, 3, 'FAILED', 'Mode switched to attendance', '2026-04-09 06:44:42', '2026-04-09 06:44:46');
+
+-- --------------------------------------------------------
+
+--
+-- Table structure for table `fingerprints`
+--
+
+CREATE TABLE `fingerprints` (
+  `id` int(11) NOT NULL,
+  `student_id` int(11) NOT NULL,
+  `finger_index` tinyint(4) NOT NULL,
+  `sensor_id` int(11) NOT NULL,
+  `device_id` int(11) NOT NULL,
+  `created_at` timestamp NOT NULL DEFAULT current_timestamp()
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
+
+--
+-- Dumping data for table `fingerprints`
+--
+
+INSERT INTO `fingerprints` (`id`, `student_id`, `finger_index`, `sensor_id`, `device_id`, `created_at`) VALUES
+(2, 15, 1, 19, 1, '2026-04-09 06:14:56'),
+(3, 15, 2, 20, 1, '2026-04-09 06:15:06');
 
 -- --------------------------------------------------------
 
@@ -333,6 +417,29 @@ CREATE TABLE `scan_waiting` (
 -- --------------------------------------------------------
 
 --
+-- Table structure for table `school_years`
+--
+
+CREATE TABLE `school_years` (
+  `id` int(11) NOT NULL,
+  `label` varchar(20) NOT NULL,
+  `start_date` date NOT NULL,
+  `end_date` date NOT NULL,
+  `is_active` tinyint(1) NOT NULL DEFAULT 0,
+  `created_at` timestamp NOT NULL DEFAULT current_timestamp(),
+  `updated_at` timestamp NOT NULL DEFAULT current_timestamp() ON UPDATE current_timestamp()
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
+
+--
+-- Dumping data for table `school_years`
+--
+
+INSERT INTO `school_years` (`id`, `label`, `start_date`, `end_date`, `is_active`, `created_at`, `updated_at`) VALUES
+(1, '2025-2026', '2025-06-01', '2026-05-31', 1, '2026-04-09 04:33:17', '2026-04-09 04:33:17');
+
+-- --------------------------------------------------------
+
+--
 -- Table structure for table `settings`
 --
 
@@ -358,7 +465,8 @@ INSERT INTO `settings` (`id`, `setting_key`, `setting_value`, `description`, `up
 (7, 'system_name', 'CAMS - Criminology Attendance System', 'System name for display', '2026-04-02 05:18:02'),
 (8, 'email_from', 'noreply@cams.local', 'Email sender address', '2026-04-02 05:18:02'),
 (9, 'notification_enabled', 'true', 'Enable/disable email notifications', '2026-04-02 05:18:02'),
-(10, 'current_mode', 'registration', 'Current scanner mode', '2026-04-05 10:55:42');
+(10, 'current_mode', 'registration', 'Current scanner mode', '2026-04-05 10:55:42'),
+(13, 'school_year', '2025-2026', NULL, '2026-04-09 04:33:17');
 
 -- --------------------------------------------------------
 
@@ -372,6 +480,7 @@ CREATE TABLE `students` (
   `first_name` varchar(100) NOT NULL,
   `middle_initial` varchar(10) DEFAULT NULL,
   `last_name` varchar(100) NOT NULL,
+  `extension` varchar(20) DEFAULT NULL,
   `email` varchar(100) DEFAULT NULL,
   `year` int(11) DEFAULT NULL,
   `section` varchar(50) DEFAULT NULL,
@@ -384,10 +493,11 @@ CREATE TABLE `students` (
 -- Dumping data for table `students`
 --
 
-INSERT INTO `students` (`id`, `student_id`, `first_name`, `middle_initial`, `last_name`, `email`, `year`, `section`, `status`, `created_at`, `updated_at`) VALUES
-(1, '2024-001', 'Juan', NULL, 'Dela Cruz', 'juan@student.edu.ph', 1, 'A', 'active', '2026-04-02 05:18:02', '2026-04-02 05:18:02'),
-(2, 'adas', 'oefoO', 'O', 'OOKD', 'dada@ffs.vom', 1, 'WQDW', 'active', '2026-04-05 10:17:25', '2026-04-05 10:17:25'),
-(3, 'DWQ', 'W', 'W', 'Q', 'W@GM.D', 1, 'W', 'active', '2026-04-05 10:19:35', '2026-04-05 10:19:35');
+INSERT INTO `students` (`id`, `student_id`, `first_name`, `middle_initial`, `last_name`, `extension`, `email`, `year`, `section`, `status`, `created_at`, `updated_at`) VALUES
+(1, '2024-001', 'Juan', NULL, 'Dela Cruz', NULL, 'juan@student.edu.ph', 1, 'A', 'active', '2026-04-02 05:18:02', '2026-04-02 05:18:02'),
+(2, 'adas', 'oefoO', 'O', 'OOKD', NULL, 'dada@ffs.vom', 1, 'WQDW', 'active', '2026-04-05 10:17:25', '2026-04-05 10:17:25'),
+(3, 'DWQ', 'W', 'W', 'Q', NULL, 'W@GM.D', 1, 'W', 'active', '2026-04-05 10:19:35', '2026-04-05 10:19:35'),
+(15, '210395', 'Alfred', 'C', 'Marcelino', 'jr', 'alfredmarcelinoii45@gmail.com', 4, 'Beta', 'active', '2026-04-09 06:14:39', '2026-04-09 06:15:58');
 
 -- --------------------------------------------------------
 
@@ -437,6 +547,32 @@ INSERT INTO `teachers` (`id`, `email`, `password`, `full_name`, `section`, `stat
 -- --------------------------------------------------------
 
 --
+-- Table structure for table `users`
+--
+
+CREATE TABLE `users` (
+  `id` int(11) NOT NULL,
+  `username` varchar(50) NOT NULL,
+  `password` varchar(255) NOT NULL,
+  `full_name` varchar(150) NOT NULL,
+  `email` varchar(120) DEFAULT NULL,
+  `role` enum('admin','teacher') NOT NULL DEFAULT 'teacher',
+  `status` enum('active','inactive') NOT NULL DEFAULT 'active',
+  `created_at` timestamp NOT NULL DEFAULT current_timestamp(),
+  `updated_at` timestamp NOT NULL DEFAULT current_timestamp() ON UPDATE current_timestamp()
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+--
+-- Dumping data for table `users`
+--
+
+INSERT INTO `users` (`id`, `username`, `password`, `full_name`, `email`, `role`, `status`, `created_at`, `updated_at`) VALUES
+(1, 'admin', '$2y$10$woShL7UfMUq6DwHOktsatuna70k4t3aYQ7kGQGXJEoZ.q/G9/ZkJe', 'Administrator', 'admin@cams.edu.ph', 'admin', 'active', '2026-04-09 05:41:37', '2026-04-09 05:41:37'),
+(2, 'teacher', '$2y$10$X904biABI8Hs3OR/HU/nLOrliiDXnLWdu5SWke2bnk7VJriCWKAP.', 'Demo Teacher', 'teacher@cams.edu.ph', 'teacher', 'active', '2026-04-09 05:41:37', '2026-04-09 05:41:37');
+
+-- --------------------------------------------------------
+
+--
 -- Structure for view `daily_attendance_summary`
 --
 DROP TABLE IF EXISTS `daily_attendance_summary`;
@@ -474,21 +610,19 @@ ALTER TABLE `attendance`
   ADD KEY `idx_status` (`status`);
 
 --
+-- Indexes for table `device_commands`
+--
+ALTER TABLE `device_commands`
+  ADD PRIMARY KEY (`id`);
+
+--
 -- Indexes for table `fingerprints`
 --
 ALTER TABLE `fingerprints`
   ADD PRIMARY KEY (`id`),
-  ADD UNIQUE KEY `unique_finger_per_student` (`student_id`,`finger_index`),
-  ADD UNIQUE KEY `sensor_id` (`sensor_id`),
-  ADD KEY `idx_sensor_id` (`sensor_id`);
-
---
--- Indexes for table `fingerprint_registrations`
---
-ALTER TABLE `fingerprint_registrations`
-  ADD PRIMARY KEY (`id`),
-  ADD KEY `idx_status_updated` (`status`,`updated_at`),
-  ADD KEY `idx_student_status` (`student_id`,`status`);
+  ADD UNIQUE KEY `uniq_fingerprints_user_finger` (`student_id`,`finger_index`),
+  ADD UNIQUE KEY `uniq_fingerprints_sensor` (`sensor_id`),
+  ADD UNIQUE KEY `uniq_student_finger` (`student_id`,`finger_index`);
 
 --
 -- Indexes for table `notification_queue`
@@ -519,6 +653,14 @@ ALTER TABLE `scan_waiting`
   ADD KEY `idx_expires` (`expires_at`);
 
 --
+-- Indexes for table `school_years`
+--
+ALTER TABLE `school_years`
+  ADD PRIMARY KEY (`id`),
+  ADD UNIQUE KEY `uniq_school_year_label` (`label`),
+  ADD KEY `idx_school_year_active` (`is_active`);
+
+--
 -- Indexes for table `settings`
 --
 ALTER TABLE `settings`
@@ -546,6 +688,14 @@ ALTER TABLE `teachers`
   ADD KEY `idx_section` (`section`);
 
 --
+-- Indexes for table `users`
+--
+ALTER TABLE `users`
+  ADD PRIMARY KEY (`id`),
+  ADD UNIQUE KEY `username` (`username`),
+  ADD UNIQUE KEY `email` (`email`);
+
+--
 -- AUTO_INCREMENT for dumped tables
 --
 
@@ -562,15 +712,15 @@ ALTER TABLE `attendance`
   MODIFY `id` int(11) NOT NULL AUTO_INCREMENT;
 
 --
+-- AUTO_INCREMENT for table `device_commands`
+--
+ALTER TABLE `device_commands`
+  MODIFY `id` bigint(20) UNSIGNED NOT NULL AUTO_INCREMENT, AUTO_INCREMENT=50;
+
+--
 -- AUTO_INCREMENT for table `fingerprints`
 --
 ALTER TABLE `fingerprints`
-  MODIFY `id` int(11) NOT NULL AUTO_INCREMENT;
-
---
--- AUTO_INCREMENT for table `fingerprint_registrations`
---
-ALTER TABLE `fingerprint_registrations`
   MODIFY `id` int(11) NOT NULL AUTO_INCREMENT, AUTO_INCREMENT=4;
 
 --
@@ -592,22 +742,34 @@ ALTER TABLE `scan_waiting`
   MODIFY `id` int(11) NOT NULL AUTO_INCREMENT, AUTO_INCREMENT=8;
 
 --
+-- AUTO_INCREMENT for table `school_years`
+--
+ALTER TABLE `school_years`
+  MODIFY `id` int(11) NOT NULL AUTO_INCREMENT, AUTO_INCREMENT=2;
+
+--
 -- AUTO_INCREMENT for table `settings`
 --
 ALTER TABLE `settings`
-  MODIFY `id` int(11) NOT NULL AUTO_INCREMENT, AUTO_INCREMENT=13;
+  MODIFY `id` int(11) NOT NULL AUTO_INCREMENT, AUTO_INCREMENT=38;
 
 --
 -- AUTO_INCREMENT for table `students`
 --
 ALTER TABLE `students`
-  MODIFY `id` int(11) NOT NULL AUTO_INCREMENT, AUTO_INCREMENT=5;
+  MODIFY `id` int(11) NOT NULL AUTO_INCREMENT, AUTO_INCREMENT=21;
 
 --
 -- AUTO_INCREMENT for table `teachers`
 --
 ALTER TABLE `teachers`
   MODIFY `id` int(11) NOT NULL AUTO_INCREMENT, AUTO_INCREMENT=2;
+
+--
+-- AUTO_INCREMENT for table `users`
+--
+ALTER TABLE `users`
+  MODIFY `id` int(11) NOT NULL AUTO_INCREMENT, AUTO_INCREMENT=3;
 
 --
 -- Constraints for dumped tables
@@ -618,12 +780,6 @@ ALTER TABLE `teachers`
 --
 ALTER TABLE `attendance`
   ADD CONSTRAINT `attendance_ibfk_1` FOREIGN KEY (`student_id`) REFERENCES `students` (`id`) ON DELETE CASCADE;
-
---
--- Constraints for table `fingerprints`
---
-ALTER TABLE `fingerprints`
-  ADD CONSTRAINT `fingerprints_ibfk_1` FOREIGN KEY (`student_id`) REFERENCES `students` (`id`) ON DELETE CASCADE;
 
 --
 -- Constraints for table `notification_queue`

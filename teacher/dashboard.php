@@ -5,6 +5,7 @@
  */
 
 require_once '../config/db.php';
+require_once '../helpers/SchoolYearHelper.php';
 require '../includes/header.php';
 
 // Verify teacher role
@@ -15,6 +16,18 @@ if ($_SESSION['role'] !== 'teacher') {
 
 $section = $_SESSION['teacher_section'];
 $today = date('Y-m-d');
+
+SchoolYearHelper::ensureSchoolYearSupport($mysqli);
+$activeSchoolYear = SchoolYearHelper::getEffectiveSchoolYearRange($mysqli);
+$schoolYearStart = $activeSchoolYear['start_date'] ?? date('Y-01-01');
+$schoolYearEnd = $activeSchoolYear['end_date'] ?? date('Y-12-31');
+
+$reportDate = $today;
+if ($reportDate < $schoolYearStart) {
+    $reportDate = $schoolYearStart;
+} elseif ($reportDate > $schoolYearEnd) {
+    $reportDate = $schoolYearEnd;
+}
 
 // Get statistics for teacher's section
 $stats = [];
@@ -34,7 +47,7 @@ $result = $mysqli->query("
         SUM(CASE WHEN a.status = 'absent' THEN 1 ELSE 0 END) as absent_count
     FROM attendance a
     INNER JOIN students s ON a.student_id = s.id
-    WHERE a.attendance_date = '$today' AND s.section = '$section'
+    WHERE a.attendance_date = '$reportDate' AND s.section = '$section'
 ");
 
 $row = $result->fetch_assoc();
@@ -60,6 +73,7 @@ $result = $mysqli->query("
     FROM attendance a
     INNER JOIN students s ON a.student_id = s.id
     WHERE s.section = '$section'
+    AND a.attendance_date BETWEEN '$schoolYearStart' AND '$schoolYearEnd'
     ORDER BY a.attendance_date DESC, a.created_at DESC
     LIMIT 10
 ");
@@ -70,6 +84,13 @@ while ($row = $result->fetch_assoc()) {
 ?>
 
 <div class="container-fluid">
+    <div class="alert alert-info mb-3">
+        <i class="bi bi-mortarboard"></i>
+        Active School Year: <strong><?php echo htmlspecialchars($activeSchoolYear['label'] ?? 'N/A'); ?></strong>
+        (<?php echo htmlspecialchars($schoolYearStart); ?> to <?php echo htmlspecialchars($schoolYearEnd); ?>)
+        | Report date: <strong><?php echo htmlspecialchars($reportDate); ?></strong>
+    </div>
+
     <!-- Statistics Cards -->
     <div class="row mb-4">
         <div class="col-md-3 mb-3">

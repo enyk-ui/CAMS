@@ -51,6 +51,17 @@ $years = [1, 2, 3, 4];
                                 <label for="lastName" class="form-label">Last Name</label>
                                 <input type="text" class="form-control" id="lastName" required>
                             </div>
+                            <div class="col-md-3">
+                                <label for="extension" class="form-label">Ext.</label>
+                                <select class="form-select" id="extension">
+                                    <option value="">Select ext (optional)</option>
+                                    <option value="Jr">Jr</option>
+                                    <option value="Sr">Sr</option>
+                                    <option value="II">II</option>
+                                    <option value="III">III</option>
+                                    <option value="IV">IV</option>
+                                </select>
+                            </div>
 
                             <div class="col-md-6">
                                 <label for="year" class="form-label">Year</label>
@@ -69,7 +80,6 @@ $years = [1, 2, 3, 4];
                                     <option value="Beta">Beta</option>
                                     <option value="Charlie">Charlie</option>
                                     <option value="Delta">Delta</option>
-                                    <option value="Echo">Echo</option>
                                 </select>
                             </div>
                         </div>
@@ -117,10 +127,17 @@ $years = [1, 2, 3, 4];
                 <div id="step2EnrollmentProgress" style="display:none;">
                     <div class="text-center mb-4">
                         <h4 id="currentFingerTitle">Finger 1 of 1</h4>
+                        <p class="text-muted mb-2" id="scanStepStatus">Scanning finger 1 - 1 of 3</p>
+                        <div class="scan-step-indicators mb-2" id="scanStepIndicators"></div>
                         <p class="text-muted mb-0">Place your finger on the scanner and wait for confirmation.</p>
                     </div>
 
                     <div class="d-flex justify-content-center gap-3 flex-wrap mb-4" id="scanCirclesContainer"></div>
+
+                    <div id="scanStatusInline" class="scan-status waiting mb-3" role="status" aria-live="polite">
+                        <i id="scanStatusIcon" class="bi bi-hourglass-split"></i>
+                        <span id="scanStatusInlineText">Waiting for next scan...</span>
+                    </div>
 
                     <div class="mb-3">
                         <div class="progress" style="height: 10px;">
@@ -197,10 +214,18 @@ let updateState = {
     pendingStudentData: null,
     studentFinalized: false,
     isSavingStudent: false,
+    isStartingEnrollment: false,
+    startRequestedAt: 0,
     scanStepsPerFinger: 3,
     currentScanStep: 1,
     lastProgressSnapshot: ''
 };
+
+function setFingerButtonsDisabled(disabled) {
+    document.querySelectorAll('.finger-btn').forEach(btn => {
+        btn.disabled = !!disabled;
+    });
+}
 
 document.addEventListener('DOMContentLoaded', function () {
     updateState.modal = new bootstrap.Modal(document.getElementById('fingerprintModal'));
@@ -270,10 +295,12 @@ document.addEventListener('DOMContentLoaded', function () {
         }
 
         try {
-            const payload = new URLSearchParams({
-                student_id: String(updateState.studentId)
+            const payload = JSON.stringify({
+                action: 'rollback',
+                student_id: updateState.studentId
             });
-            navigator.sendBeacon('../api/rollback_registration.php', payload);
+            const blob = new Blob([payload], { type: 'application/json' });
+            navigator.sendBeacon('../api/register.php', blob);
         } catch (e) {
             // Best-effort cleanup only.
         }
@@ -311,6 +338,7 @@ function submitRegistration(e) {
         first_name: document.getElementById('firstName').value.trim(),
         middle_initial: document.getElementById('middleInitial').value.trim() || '',
         last_name: document.getElementById('lastName').value.trim(),
+        extension: document.getElementById('extension').value.trim() || '',
         email: document.getElementById('email').value.trim(),
         year: document.getElementById('year').value,
         section: document.getElementById('section').value.trim()
@@ -329,7 +357,7 @@ function submitRegistration(e) {
             }
 
             updateState.studentId = data.student_id;
-            updateState.studentName = studentData.first_name + ' ' + studentData.last_name;
+            updateState.studentName = formatNameDisplay(studentData);
             updateState.pendingStudentData = studentData;
             updateState.studentCreatedInSession = true;
             updateState.enrollmentCompleted = false;
@@ -374,16 +402,40 @@ function finalizeStudentRegistration() {
         first_name: updateState.pendingStudentData.first_name,
         middle_initial: updateState.pendingStudentData.middle_initial || '',
         last_name: updateState.pendingStudentData.last_name,
-        email: updateState.pendingStudentData.email
+        extension: updateState.pendingStudentData.extension || '',
+        email: updateState.pendingStudentData.email,
+        year: updateState.pendingStudentData.year || null,
+        section: updateState.pendingStudentData.section || '',
+        finalize: true
     };
 
-    return fetch('../api/finalize_registration.php', {
+    return fetch('../api/register.php', {
         method: 'POST',
         headers: {
             'Content-Type': 'application/json'
         },
         body: JSON.stringify(payload)
     }).then(response => response.json());
+}
+
+function formatNameDisplay(data) {
+    const first = String(data.first_name || '').trim();
+    const middle = String(data.middle_initial || '').trim();
+    const last = String(data.last_name || '').trim();
+    const ext = String(data.extension || '').trim();
+
+    let name = last;
+    if (first) {
+        name += (name ? ', ' : '') + first;
+    }
+    if (middle) {
+        name += ' ' + middle.charAt(0).toUpperCase() + '.';
+    }
+    if (ext) {
+        name += ' ' + ext;
+    }
+
+    return name.trim();
 }
 
 function setScannerMode(mode) {
@@ -430,7 +482,92 @@ function renderScanCircles(totalFingers) {
     container.innerHTML = html;
 }
 
+function updateScanStepIndicators() {
+    const container = document.getElementById('scanStepIndicators');
+    if (!container) {
+        return;
+    }
+
+    let html = '';
+    for (let i = 1; i <= updateState.scanStepsPerFinger; i++) {
+        let cls = 'scan-step';
+        if (i < updateState.currentScanStep) {
+            cls += ' done';
+        } else if (i === updateState.currentScanStep) {
+            cls += ' active';
+        }
+        html += `<span class="${cls}">${i}</span>`;
+    }
+    container.innerHTML = html;
+}
+
+function setInlineScanStatus(type, message) {
+    const statusInline = document.getElementById('scanStatusInline');
+    const statusText = document.getElementById('scanStatusInlineText');
+    const statusIcon = document.getElementById('scanStatusIcon');
+
+    if (!statusInline || !statusText || !statusIcon) {
+        return;
+    }
+
+    const safeType = ['waiting', 'success', 'error'].includes(type) ? type : 'waiting';
+    statusInline.className = `scan-status ${safeType} mb-3`;
+    statusText.textContent = message || 'Waiting for next scan...';
+
+    if (safeType === 'success') {
+        statusIcon.className = 'bi bi-check-circle-fill';
+    } else if (safeType === 'error') {
+        statusIcon.className = 'bi bi-exclamation-triangle-fill';
+    } else {
+        statusIcon.className = 'bi bi-hourglass-split';
+    }
+}
+
+function formatEnrollmentUiError(message) {
+    const raw = String(message || '').trim();
+    const lower = raw.toLowerCase();
+
+    if (!raw) {
+        return 'Fingerprint scanning error. Please try again.';
+    }
+
+    // Hide low-level scanner internals like getImage/image2Tz/code values from end users.
+    if (
+        lower.includes('getimage') ||
+        lower.includes('image2tz') ||
+        lower.includes('createmodel') ||
+        lower.includes('storemodel') ||
+        lower.includes('remove finger timeout') ||
+        lower.includes('scanner enrollment failed') ||
+        lower.includes('code=')
+    ) {
+        return 'Fingerprint scanning error. Please place your finger properly and try again.';
+    }
+
+    return raw;
+}
+
 async function startEnrollment() {
+    const now = Date.now();
+    if (updateState.isStartingEnrollment) {
+        appendDebug('Start enrollment ignored: request already in progress');
+        return;
+    }
+
+    // Debounce accidental double-clicks/taps.
+    if (updateState.startRequestedAt > 0 && (now - updateState.startRequestedAt) < 1200) {
+        appendDebug('Start enrollment ignored: duplicate trigger');
+        return;
+    }
+
+    // Do not create another ENROLL session while current one is active.
+    if (updateState.registrationId && !updateState.enrollmentCompleted) {
+        appendDebug('Start enrollment ignored: active registration already exists', {
+            registration_id: updateState.registrationId
+        });
+        return;
+    }
+
     if (!updateState.studentId) {
         showError('Student registration was not created.');
         return;
@@ -448,6 +585,9 @@ async function startEnrollment() {
     updateState.enrolledFingerprints = [];
     updateState.enrollmentCompleted = false;
     updateState.pollFailures = 0;
+    updateState.isStartingEnrollment = true;
+    updateState.startRequestedAt = now;
+    setFingerButtonsDisabled(true);
     appendDebug('Starting enrollment for student_id=' + String(updateState.studentId));
 
     renderScanCircles(updateState.numFingers);
@@ -455,14 +595,15 @@ async function startEnrollment() {
     updateProgress();
 
     showWaitingMessage('Sending registration command to scanner...');
-    appendDebug('Calling start_registration API');
+    appendDebug('Calling register API (start action)');
 
-    fetch('../api/start_registration.php', {
+    fetch('../api/register.php', {
         method: 'POST',
         headers: {
             'Content-Type': 'application/json'
         },
         body: JSON.stringify({
+            action: 'start',
             student_id: updateState.studentId,
             total_fingers: updateState.numFingers
         })
@@ -480,11 +621,28 @@ async function startEnrollment() {
             updateState.numFingers = Math.max(1, parseInt(data.total_fingers, 10));
         }
         showWaitingMessage('Command queued. Place your finger on the scanner.');
+        setInlineScanStatus('waiting', 'Waiting for finger 1 scan...');
+        updateState.isStartingEnrollment = false;
         beginEnrollmentMonitor();
     })
     .catch(error => {
+        updateState.isStartingEnrollment = false;
+        setFingerButtonsDisabled(false);
         showError('Connection error: ' + error.message);
     });
+}
+
+function handleRetryAction() {
+    if (updateState.isStartingEnrollment) {
+        return;
+    }
+
+    if (updateState.registrationId) {
+        retryEnrollment();
+        return;
+    }
+
+    startEnrollment();
 }
 
 function beginEnrollmentMonitor() {
@@ -558,6 +716,21 @@ function beginEnrollmentMonitor() {
                 return;
             }
 
+            if (data.mode === 'failed') {
+                const rawError = data.message || 'Enrollment failed on scanner. Please retry enrollment.';
+                const uiError = formatEnrollmentUiError(rawError);
+
+                appendDebug('Device reported enrollment failure', {
+                    ...data,
+                    raw_error: rawError,
+                    ui_error: uiError
+                });
+
+                showError(uiError);
+                showAlert('danger', uiError);
+                return;
+            }
+
             if (data.mode === 'attendance' && updateState.registrationId) {
                 if (updateState.lastServerFinger <= updateState.numFingers) {
                     markFingerCompleted(updateState.lastServerFinger);
@@ -566,13 +739,14 @@ function beginEnrollmentMonitor() {
                     showWaitingMessage(`Registered (ID: ${data.last_sensor_id})`);
                 }
                 appendDebug('Mode switched to attendance; registration complete path reached');
+                showAlert('success', 'Fingerprint enrollment finished. Review and save student record.');
                 showCompletion();
             }
         } catch (error) {
             appendDebug('get_mode poll error: ' + error.message);
             // Keep polling on transient failures.
         }
-    }, 2000);
+    }, 700);
 }
 
 function markFingerCompleted(fingerNo) {
@@ -595,8 +769,10 @@ function markFingerCompleted(fingerNo) {
     if (statusText) {
         if (fingerNo >= updateState.numFingers) {
             statusText.textContent = `Finger ${fingerNo} of ${updateState.numFingers} registered`;
+            setInlineScanStatus('success', `Success: finger ${fingerNo} of ${updateState.numFingers} registered.`);
         } else {
             statusText.textContent = `Finger ${fingerNo} registered. Place finger ${fingerNo + 1} of ${updateState.numFingers}.`;
+            setInlineScanStatus('success', `Success: finger ${fingerNo} saved. Waiting for finger ${fingerNo + 1} scan...`);
         }
     }
 
@@ -606,6 +782,13 @@ function markFingerCompleted(fingerNo) {
 function updateProgress() {
     document.getElementById('currentFingerTitle').textContent =
         `Finger ${updateState.currentFinger} of ${updateState.numFingers}`;
+
+    const scanStepStatus = document.getElementById('scanStepStatus');
+    if (scanStepStatus) {
+        scanStepStatus.textContent = `Scanning finger ${updateState.currentFinger} - ${updateState.currentScanStep} of ${updateState.scanStepsPerFinger}`;
+    }
+
+    updateScanStepIndicators();
 
     document.querySelectorAll('.scan-circle').forEach(circle => {
         if (!circle.classList.contains('success')) {
@@ -623,6 +806,8 @@ function updateProgress() {
     if (statusText) {
         statusText.textContent = `Scanning finger ${updateState.currentFinger} ${updateState.currentScanStep} of ${updateState.scanStepsPerFinger}`;
     }
+
+    setInlineScanStatus('waiting', `Waiting: scan finger ${updateState.currentFinger} (${updateState.currentScanStep} of ${updateState.scanStepsPerFinger})...`);
 
     updateOverallProgress();
 }
@@ -655,6 +840,8 @@ function showWaitingMessage(message) {
     if (statusDiv) {
         statusDiv.className = 'alert alert-info mb-4';
     }
+
+    setInlineScanStatus('waiting', message || 'Waiting for next scan...');
 }
 
 function showError(message) {
@@ -665,12 +852,13 @@ function showError(message) {
             <div>
                 <i class="bi bi-exclamation-triangle me-2"></i>${message}
             </div>
-            <button type="button" class="btn btn-sm btn-outline-danger" onclick="startEnrollment()">
+            <button type="button" class="btn btn-sm btn-outline-danger" onclick="handleRetryAction()">
                 <i class="bi bi-arrow-clockwise me-1"></i>Retry
             </button>
         </div>
     `;
     appendDebug('ERROR: ' + message);
+    setInlineScanStatus('error', `Error: ${message}. Try again.`);
 }
 
 async function showCompletion() {
@@ -731,12 +919,13 @@ async function retryEnrollment() {
     }
 
     try {
-        const response = await fetch('../api/retry_registration.php', {
+        const response = await fetch('../api/register.php', {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json'
             },
             body: JSON.stringify({
+                action: 'retry',
                 student_id: updateState.studentId,
                 total_fingers: updateState.numFingers
             })
@@ -758,8 +947,11 @@ async function retryEnrollment() {
         updateState.studentFinalized = false;
         updateState.currentScanStep = 1;
         updateState.lastProgressSnapshot = '';
+        updateState.isStartingEnrollment = false;
+        updateState.startRequestedAt = 0;
 
         renderScanCircles(updateState.numFingers);
+        setFingerButtonsDisabled(true);
         updateProgress();
         showWaitingMessage('Retry queued. Scanner will clear previous fingerprints and start scanning again.');
         beginEnrollmentMonitor();
@@ -771,12 +963,13 @@ async function retryEnrollment() {
 function rollbackIncompleteRegistration() {
     updateState.rollbackInProgress = true;
 
-    fetch('../api/rollback_registration.php', {
+    fetch('../api/register.php', {
         method: 'POST',
         headers: {
             'Content-Type': 'application/json'
         },
         body: JSON.stringify({
+            action: 'rollback',
             student_id: updateState.studentId
         })
     })
@@ -825,10 +1018,16 @@ function resetModal() {
     updateState.pendingStudentData = null;
     updateState.studentFinalized = false;
     updateState.isSavingStudent = false;
+    updateState.isStartingEnrollment = false;
+    updateState.startRequestedAt = 0;
     updateState.currentScanStep = 1;
     updateState.lastProgressSnapshot = '';
+    setFingerButtonsDisabled(false);
+
+    setInlineScanStatus('waiting', 'Waiting for next scan...');
 
     updateOverallProgress();
+    updateScanStepIndicators();
 
     const debugBox = document.getElementById('debugMessage');
     const debugText = document.getElementById('debugText');
@@ -890,6 +1089,40 @@ function showAlert(type, message) {
 </script>
 
 <style>
+.scan-step-indicators {
+    display: flex;
+    justify-content: center;
+    gap: 8px;
+}
+
+.scan-step {
+    width: 30px;
+    height: 30px;
+    border-radius: 999px;
+    border: 2px solid #d1d5db;
+    color: #6b7280;
+    font-size: 0.85rem;
+    font-weight: 700;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    background: #fff;
+}
+
+.scan-step.active {
+    border-color: #3b82f6;
+    color: #1d4ed8;
+    background: #dbeafe;
+}
+
+.scan-step.done {
+    border-color: #10b981;
+    color: #047857;
+    background: #d1fae5;
+}
+</style>
+
+<style>
 .fingerprint-selector {
     display: grid;
     grid-template-columns: repeat(5, minmax(0, 1fr));
@@ -945,6 +1178,38 @@ function showAlert(type, message) {
     text-align: center;
     border-bottom: 1px solid #e5e7eb;
     padding-bottom: 15px;
+}
+
+.scan-status {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    border: 2px solid #d1d5db;
+    border-radius: 12px;
+    padding: 10px 14px;
+    font-weight: 600;
+}
+
+.scan-status i {
+    font-size: 1.05rem;
+}
+
+.scan-status.waiting {
+    background: #eff6ff;
+    border-color: #93c5fd;
+    color: #1e40af;
+}
+
+.scan-status.success {
+    background: #ecfdf5;
+    border-color: #86efac;
+    color: #065f46;
+}
+
+.scan-status.error {
+    background: #fef2f2;
+    border-color: #fca5a5;
+    color: #991b1b;
 }
 </style>
 

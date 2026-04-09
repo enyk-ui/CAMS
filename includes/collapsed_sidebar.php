@@ -42,17 +42,12 @@
 
             <a href="users.php" class="nav-item <?php echo $current_page === 'users.php' ? 'active' : ''; ?>">
                 <i class="fa-solid fa-user-tie"></i>
-                <span class="nav-label">Users</span>
+                <span class="nav-label">Teachers</span>
             </a>
 
             <a href="settings.php" class="nav-item <?php echo $current_page === 'settings.php' ? 'active' : ''; ?>">
                 <i class="fa-solid fa-gear"></i>
                 <span class="nav-label">Settings</span>
-            </a>
-
-            <a href="notifications.php" class="nav-item <?php echo $current_page === 'notifications.php' ? 'active' : ''; ?>">
-                <i class="fa-solid fa-bell"></i>
-                <span class="nav-label">Notifications</span>
             </a>
 
         <?php elseif ($role === 'teacher'): ?>
@@ -70,11 +65,6 @@
             <a href="attendance_report.php" class="nav-item <?php echo $current_page === 'attendance_report.php' ? 'active' : ''; ?>">
                 <i class="fa-solid fa-chart-bar"></i>
                 <span class="nav-label">Reports</span>
-            </a>
-
-            <a href="notifications.php" class="nav-item <?php echo $current_page === 'notifications.php' ? 'active' : ''; ?>">
-                <i class="fa-solid fa-bell"></i>
-                <span class="nav-label">Notifications</span>
             </a>
         <?php endif; ?>
     </nav>

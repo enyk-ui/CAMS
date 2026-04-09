@@ -61,6 +61,7 @@ $tables = [
             first_name VARCHAR(100) NOT NULL,
             middle_initial VARCHAR(10),
             last_name VARCHAR(100) NOT NULL,
+            extension VARCHAR(20) DEFAULT NULL,
             email VARCHAR(100) UNIQUE,
             year INT,
             section VARCHAR(50),

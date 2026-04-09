@@ -7,7 +7,11 @@
 session_start();
 ob_start();
 require_once '../config/db.php';
+require_once '../helpers/SchoolYearHelper.php';
 require '../includes/header.php';
+
+SchoolYearHelper::ensureSchoolYearSupport($mysqli);
+$activeSchoolYear = SchoolYearHelper::getEffectiveSchoolYearRange($mysqli);
 
 function normalizeDateValue($value, $fallback)
 {
@@ -19,43 +23,194 @@ function normalizeDateValue($value, $fallback)
     return ($date && $date->format('Y-m-d') === $value) ? $value : $fallback;
 }
 
+function tableExists($mysqli, $tableName)
+{
+    $stmt = $mysqli->prepare('SELECT 1 FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = ? LIMIT 1');
+    if (!$stmt) {
+        return false;
+    }
+    $stmt->bind_param('s', $tableName);
+    $stmt->execute();
+    $result = $stmt->get_result();
+    return (bool) ($result && $result->num_rows > 0);
+}
+
+function columnExists($mysqli, $tableName, $columnName)
+{
+    $stmt = $mysqli->prepare('SELECT 1 FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = ? AND column_name = ? LIMIT 1');
+    if (!$stmt) {
+        return false;
+    }
+    $stmt->bind_param('ss', $tableName, $columnName);
+    $stmt->execute();
+    $result = $stmt->get_result();
+    return (bool) ($result && $result->num_rows > 0);
+}
+
+function formatAttendanceName(array $row): string
+{
+    $first = trim((string) ($row['first_name'] ?? ''));
+    $middle = trim((string) ($row['middle_initial'] ?? ''));
+    $last = trim((string) ($row['last_name'] ?? ''));
+    $ext = trim((string) ($row['extension'] ?? ''));
+
+    $name = $last;
+    if ($first !== '') {
+        $name .= ($name !== '' ? ', ' : '') . $first;
+    }
+    if ($middle !== '') {
+        $name .= ' ' . strtolower(substr($middle, 0, 1)) . '.';
+    }
+    if ($ext !== '') {
+        $name .= ' ' . strtolower($ext);
+    }
+
+    return strtolower(trim($name));
+}
+
+function getAttendanceLogsContext($mysqli)
+{
+    if (!tableExists($mysqli, 'attendance_logs')) {
+        return null;
+    }
+
+    $idColumn = null;
+    $timeColumn = null;
+
+    if (columnExists($mysqli, 'attendance_logs', 'user_id')) {
+        $idColumn = 'user_id';
+    } elseif (columnExists($mysqli, 'attendance_logs', 'student_id')) {
+        $idColumn = 'student_id';
+    }
+
+    if (columnExists($mysqli, 'attendance_logs', 'timestamp')) {
+        $timeColumn = 'timestamp';
+    } elseif (columnExists($mysqli, 'attendance_logs', 'created_at')) {
+        $timeColumn = 'created_at';
+    }
+
+    if (!$idColumn || !$timeColumn) {
+        return null;
+    }
+
+    return [
+        'idColumn' => $idColumn,
+        'timeColumn' => $timeColumn,
+        'hasStudents' => tableExists($mysqli, 'students'),
+        'hasUsers' => tableExists($mysqli, 'users'),
+    ];
+}
+
 function fetchAttendanceLogs($mysqli, $startDate, $endDate, $studentFilter = '', $statusFilter = '', $limit = 1000)
 {
-    $sql = "
-        SELECT
-            s.student_id,
-            s.first_name,
-            s.last_name,
-            a.attendance_date,
-            a.time_in_am,
-            a.time_out_am,
-            a.time_in_pm,
-            a.time_out_pm,
-            a.status
-        FROM attendance a
-        JOIN students s ON a.student_id = s.id
-        WHERE a.attendance_date BETWEEN ? AND ?
-    ";
-
     $types = 'ss';
     $params = [$startDate, $endDate];
 
-    if ($studentFilter !== '') {
-        $sql .= " AND (s.first_name LIKE ? OR s.last_name LIKE ? OR s.student_id LIKE ?)";
-        $studentLike = '%' . $studentFilter . '%';
-        $params[] = $studentLike;
-        $params[] = $studentLike;
-        $params[] = $studentLike;
-        $types .= 'sss';
-    }
+    if (tableExists($mysqli, 'attendance') && tableExists($mysqli, 'students')) {
+        $middleInitialExpr = columnExists($mysqli, 'students', 'middle_initial') ? 'COALESCE(s.middle_initial, "")' : '""';
+        $extensionExpr = columnExists($mysqli, 'students', 'extension') ? 'COALESCE(s.extension, "")' : '""';
+        $sql = "
+            SELECT
+                s.student_id,
+                s.first_name,
+                s.last_name,
+                {$middleInitialExpr} AS middle_initial,
+                {$extensionExpr} AS extension,
+                a.attendance_date,
+                a.time_in_am,
+                a.time_out_am,
+                a.time_in_pm,
+                a.time_out_pm,
+                a.status
+            FROM attendance a
+            JOIN students s ON a.student_id = s.id
+            WHERE a.attendance_date BETWEEN ? AND ?
+        ";
 
-    if ($statusFilter !== '') {
-        $sql .= " AND a.status = ?";
-        $params[] = $statusFilter;
-        $types .= 's';
-    }
+        if ($studentFilter !== '') {
+            $sql .= " AND (s.first_name LIKE ? OR s.last_name LIKE ? OR s.student_id LIKE ?)";
+            $studentLike = '%' . $studentFilter . '%';
+            $params[] = $studentLike;
+            $params[] = $studentLike;
+            $params[] = $studentLike;
+            $types .= 'sss';
+        }
 
-    $sql .= " ORDER BY a.attendance_date DESC, a.created_at DESC";
+        if ($statusFilter !== '') {
+            $sql .= " AND a.status = ?";
+            $params[] = $statusFilter;
+            $types .= 's';
+        }
+
+        $sql .= " ORDER BY a.attendance_date DESC, a.created_at DESC";
+    } else {
+        $ctx = getAttendanceLogsContext($mysqli);
+        if (!$ctx) {
+            return [];
+        }
+
+        $idColumn = $ctx['idColumn'];
+        $timeColumn = $ctx['timeColumn'];
+        $joinClause = '';
+        $studentIdExpr = "CAST(al.{$idColumn} AS CHAR)";
+        $firstNameExpr = "CONCAT('ID #', al.{$idColumn})";
+        $lastNameExpr = "''";
+        $middleInitialExpr = "''";
+        $extensionExpr = "''";
+
+        if ($idColumn === 'student_id' && $ctx['hasStudents']) {
+            $joinClause = 'LEFT JOIN students s ON al.student_id = s.id';
+            $studentIdExpr = 'COALESCE(s.student_id, CAST(al.student_id AS CHAR))';
+            $firstNameExpr = "COALESCE(s.first_name, CONCAT('Student #', al.student_id))";
+            $lastNameExpr = "COALESCE(s.last_name, '')";
+            $middleInitialExpr = columnExists($mysqli, 'students', 'middle_initial') ? "COALESCE(s.middle_initial, '')" : "''";
+            $extensionExpr = columnExists($mysqli, 'students', 'extension') ? "COALESCE(s.extension, '')" : "''";
+        } elseif ($idColumn === 'user_id' && $ctx['hasUsers']) {
+            $joinClause = 'LEFT JOIN users u ON al.user_id = u.id';
+            $studentIdExpr = 'COALESCE(u.student_no, CAST(al.user_id AS CHAR))';
+            $firstNameExpr = "COALESCE(u.full_name, CONCAT('User #', al.user_id))";
+            $lastNameExpr = "''";
+        }
+
+        $sql = "
+            SELECT
+                {$studentIdExpr} AS student_id,
+                {$firstNameExpr} AS first_name,
+                {$lastNameExpr} AS last_name,
+                {$middleInitialExpr} AS middle_initial,
+                {$extensionExpr} AS extension,
+                DATE(al.{$timeColumn}) AS attendance_date,
+                CASE WHEN HOUR(al.{$timeColumn}) < 12 THEN TIME(al.{$timeColumn}) ELSE NULL END AS time_in_am,
+                NULL AS time_out_am,
+                CASE WHEN HOUR(al.{$timeColumn}) >= 12 THEN TIME(al.{$timeColumn}) ELSE NULL END AS time_in_pm,
+                NULL AS time_out_pm,
+                CASE WHEN al.type = 'IN' THEN 'present' ELSE 'absent' END AS status
+            FROM attendance_logs al
+            {$joinClause}
+            WHERE DATE(al.{$timeColumn}) BETWEEN ? AND ?
+        ";
+
+        if ($studentFilter !== '') {
+            $sql .= " AND ({$studentIdExpr} LIKE ? OR {$firstNameExpr} LIKE ? OR {$lastNameExpr} LIKE ?)";
+            $studentLike = '%' . $studentFilter . '%';
+            $params[] = $studentLike;
+            $params[] = $studentLike;
+            $params[] = $studentLike;
+            $types .= 'sss';
+        }
+
+        if ($statusFilter !== '') {
+            if ($statusFilter === 'late') {
+                $sql .= " AND 1 = 0";
+            } elseif ($statusFilter === 'present') {
+                $sql .= " AND al.type = 'IN'";
+            } elseif ($statusFilter === 'absent') {
+                $sql .= " AND al.type <> 'IN'";
+            }
+        }
+
+        $sql .= " ORDER BY al.{$timeColumn} DESC";
+    }
 
     if ($limit !== null) {
         $sql .= " LIMIT " . (int) $limit;
@@ -86,8 +241,12 @@ function fetchAttendanceLogs($mysqli, $startDate, $endDate, $studentFilter = '',
     return $logs;
 }
 
-$default_start_date = date('Y-m-d', strtotime('-30 days'));
-$default_end_date = date('Y-m-d');
+$default_start_date = $activeSchoolYear['start_date'] ?? date('Y-m-d', strtotime('-30 days'));
+$default_end_date = $activeSchoolYear['end_date'] ?? date('Y-m-d');
+$today = date('Y-m-d');
+if ($default_end_date > $today) {
+    $default_end_date = $today;
+}
 $legacy_date = normalizeDateValue($_GET['date'] ?? '', '');
 
 $filter_start_date = normalizeDateValue($_GET['start_date'] ?? '', $default_start_date);
@@ -123,7 +282,7 @@ if (($_GET['export'] ?? '') === 'csv') {
         fputcsv($fp, [
             $log['attendance_date'],
             $log['student_id'],
-            $log['first_name'] . ' ' . $log['last_name'],
+            formatAttendanceName($log),
             $log['time_in_am'] ?? '-',
             $log['time_out_am'] ?? '-',
             $log['time_in_pm'] ?? '-',
@@ -144,6 +303,12 @@ $export_query = http_build_query([
     'status' => $filter_status,
 ], '', '&', PHP_QUERY_RFC3986);
 ?>
+
+<div class="alert alert-info mb-3">
+    <i class="bi bi-mortarboard"></i>
+    Active School Year default: <strong><?php echo htmlspecialchars($activeSchoolYear['label'] ?? 'N/A'); ?></strong>
+    (<?php echo htmlspecialchars($activeSchoolYear['start_date'] ?? ''); ?> to <?php echo htmlspecialchars($activeSchoolYear['end_date'] ?? ''); ?>)
+</div>
 
 <!-- Filters -->
 <div class="card mb-4">
@@ -221,7 +386,7 @@ $export_query = http_build_query([
                         <tr>
                             <td><strong><?php echo date('M d, Y', strtotime($log['attendance_date'])); ?></strong></td>
                             <td><?php echo htmlspecialchars($log['student_id']); ?></td>
-                            <td><?php echo htmlspecialchars($log['first_name'] . ' ' . $log['last_name']); ?></td>
+                            <td><?php echo htmlspecialchars(formatAttendanceName($log)); ?></td>
                             <td><?php echo $log['time_in_am'] ? date('h:i A', strtotime($log['time_in_am'])) : '-'; ?></td>
                             <td><?php echo $log['time_out_am'] ? date('h:i A', strtotime($log['time_out_am'])) : '-'; ?></td>
                             <td><?php echo $log['time_in_pm'] ? date('h:i A', strtotime($log['time_in_pm'])) : '-'; ?></td>

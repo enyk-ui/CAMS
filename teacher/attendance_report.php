@@ -5,7 +5,36 @@
  */
 
 require_once '../config/db.php';
+require_once '../helpers/SchoolYearHelper.php';
 require '../includes/header.php';
+
+function studentColumnExists(mysqli $mysqli, string $columnName): bool
+{
+    $safeColumn = $mysqli->real_escape_string($columnName);
+    $result = $mysqli->query("SHOW COLUMNS FROM students LIKE '{$safeColumn}'");
+    return $result && $result->num_rows > 0;
+}
+
+function formatAttendanceHistoryName(array $record): string
+{
+    $first = trim((string) ($record['first_name'] ?? ''));
+    $middle = trim((string) ($record['middle_initial'] ?? ''));
+    $last = trim((string) ($record['last_name'] ?? ''));
+    $ext = trim((string) ($record['extension'] ?? ''));
+
+    $name = $last;
+    if ($first !== '') {
+        $name .= ($name !== '' ? ', ' : '') . $first;
+    }
+    if ($middle !== '') {
+        $name .= ' ' . strtolower(substr($middle, 0, 1)) . '.';
+    }
+    if ($ext !== '') {
+        $name .= ' ' . strtolower($ext);
+    }
+
+    return strtolower(trim($name));
+}
 
 if ($_SESSION['role'] !== 'teacher') {
     header('Location: ../index.php?error=Unauthorized');
@@ -13,9 +42,21 @@ if ($_SESSION['role'] !== 'teacher') {
 }
 
 $section = $_SESSION['teacher_section'];
+SchoolYearHelper::ensureSchoolYearSupport($mysqli);
+$hasMiddleInitial = studentColumnExists($mysqli, 'middle_initial');
+$hasExtension = studentColumnExists($mysqli, 'extension');
+$activeSchoolYear = SchoolYearHelper::getEffectiveSchoolYearRange($mysqli);
+$syStartDate = $activeSchoolYear['start_date'] ?? date('Y-01-01');
+$syEndDate = $activeSchoolYear['end_date'] ?? date('Y-12-31');
 
 // Filter parameters
-$filter_date = isset($_GET['date']) ? $_GET['date'] : date('Y-m-d');
+$defaultDate = date('Y-m-d');
+if ($defaultDate < $syStartDate) {
+    $defaultDate = $syStartDate;
+} elseif ($defaultDate > $syEndDate) {
+    $defaultDate = $syEndDate;
+}
+$filter_date = isset($_GET['date']) ? $_GET['date'] : $defaultDate;
 $filter_status = isset($_GET['status']) ? $_GET['status'] : '';
 
 // Build query
@@ -24,6 +65,8 @@ $query = "
         s.student_id,
         s.first_name,
         s.last_name,
+        " . ($hasMiddleInitial ? "COALESCE(s.middle_initial, '')" : "''") . " AS middle_initial,
+        " . ($hasExtension ? "COALESCE(s.extension, '')" : "''") . " AS extension,
         a.attendance_date,
         a.time_in_am,
         a.time_out_am,
@@ -34,6 +77,7 @@ $query = "
     FROM students s
     LEFT JOIN attendance a ON s.id = a.student_id
     WHERE s.section = '$section' AND s.status = 'active'
+    AND (a.attendance_date BETWEEN '$syStartDate' AND '$syEndDate' OR a.attendance_date IS NULL)
 ";
 
 if ($filter_date) {
@@ -44,7 +88,7 @@ if ($filter_status) {
     $query .= " AND a.status = '$filter_status'";
 }
 
-$query .= " ORDER BY s.first_name, a.attendance_date DESC";
+$query .= " ORDER BY s.last_name, s.first_name, a.attendance_date DESC";
 
 $records = [];
 $result = $mysqli->query($query);
@@ -62,6 +106,7 @@ $seg_result = $mysqli->query("
     FROM attendance a
     INNER JOIN students s ON a.student_id = s.id
     WHERE s.section = '$section'
+    AND a.attendance_date BETWEEN '$syStartDate' AND '$syEndDate'
     AND a.attendance_date = '$filter_date'
     GROUP BY a.status
 ");
@@ -72,6 +117,12 @@ while ($row = $seg_result->fetch_assoc()) {
 ?>
 
 <div class="container-fluid">
+    <div class="alert alert-info mb-3">
+        <i class="bi bi-mortarboard"></i>
+        Active School Year: <strong><?php echo htmlspecialchars($activeSchoolYear['label'] ?? 'N/A'); ?></strong>
+        (<?php echo htmlspecialchars($syStartDate); ?> to <?php echo htmlspecialchars($syEndDate); ?>)
+    </div>
+
     <!-- Filters -->
     <div class="row mb-4">
         <div class="col-12">
@@ -169,7 +220,7 @@ while ($row = $seg_result->fetch_assoc()) {
                                     ?>
                                         <tr>
                                             <td><?php echo htmlspecialchars($record['student_id']); ?></td>
-                                            <td><?php echo htmlspecialchars($record['first_name'] . ' ' . $record['last_name']); ?></td>
+                                            <td><?php echo htmlspecialchars(formatAttendanceHistoryName($record)); ?></td>
                                             <td><?php echo date('M d, Y', strtotime($record['attendance_date'])); ?></td>
                                             <td><?php echo $record['time_in_am'] ? date('H:i', strtotime($record['time_in_am'])) : '-'; ?></td>
                                             <td><?php echo $record['time_out_am'] ? date('H:i', strtotime($record['time_out_am'])) : '-'; ?></td>
