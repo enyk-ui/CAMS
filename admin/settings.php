@@ -234,7 +234,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $endTime = trim((string)($_POST['end_time'] ?? ''));
         $lateThreshold = (int)($_POST['late_threshold_minutes'] ?? 15);
 
-        if ($sectionId <= 0 || $dayOfWeek < 1 || $dayOfWeek > 5 || $startTime === '' || $endTime === '') {
+        if ($sectionId <= 0 || $dayOfWeek < 1 || $dayOfWeek > 7 || $startTime === '' || $endTime === '') {
             $message = 'Please complete section, day, and time fields.';
             $message_type = 'danger';
         } elseif (!preg_match('/^\d{2}:\d{2}$/', $startTime) || !preg_match('/^\d{2}:\d{2}$/', $endTime)) {
@@ -469,6 +469,8 @@ $dayLabels = [
     3 => 'Wednesday',
     4 => 'Thursday',
     5 => 'Friday',
+    6 => 'Saturday',
+    7 => 'Sunday',
 ];
 
 $sessionEmail = trim((string) ($_SESSION['admin_email'] ?? ''));
@@ -563,6 +565,8 @@ if (ensureUsersAdminSchema($mysqli)) {
                             <option value="3">Wednesday</option>
                             <option value="4">Thursday</option>
                             <option value="5">Friday</option>
+                            <option value="6">Saturday</option>
+                            <option value="7">Sunday</option>
                         </select>
                     </div>
 
@@ -688,6 +692,8 @@ if (ensureUsersAdminSchema($mysqli)) {
                                 <option value="3">Wednesday</option>
                                 <option value="4">Thursday</option>
                                 <option value="5">Friday</option>
+                                <option value="6">Saturday</option>
+                                <option value="7">Sunday</option>
                             </select>
                         </div>
 

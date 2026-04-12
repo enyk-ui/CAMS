@@ -257,7 +257,7 @@ function formatDisplayTime(?string $time): string
     return date('h:i A', $ts);
 }
 
-function resolveScanWindow(string $currentDate, array $schedule): ?array
+function resolveScanWindow(string $anchorDate, array $schedule): ?array
 {
     $timeIn = trim((string)($schedule['time_in'] ?? ''));
     $timeOut = trim((string)($schedule['time_out'] ?? ''));
@@ -265,10 +265,19 @@ function resolveScanWindow(string $currentDate, array $schedule): ?array
         return null;
     }
 
-    $timeInTs = strtotime($currentDate . ' ' . $timeIn);
-    $timeOutTs = strtotime($currentDate . ' ' . $timeOut);
+    $timeInTs = strtotime($anchorDate . ' ' . $timeIn);
+    $timeOutTs = strtotime($anchorDate . ' ' . $timeOut);
     if ($timeInTs === false || $timeOutTs === false) {
         return null;
+    }
+
+    // Support overnight schedules (e.g., 20:00 to 10:00 on the next day).
+    $crossesMidnight = $timeOutTs <= $timeInTs;
+    if ($crossesMidnight) {
+        $timeOutTs = strtotime('+1 day', $timeOutTs);
+        if ($timeOutTs === false) {
+            return null;
+        }
     }
 
     $windowStartTs = $timeInTs - (ATTENDANCE_WINDOW_BEFORE_IN_MINUTES * 60);
@@ -279,6 +288,7 @@ function resolveScanWindow(string $currentDate, array $schedule): ?array
         'end_ts' => $windowEndTs,
         'start_time' => date('H:i:s', $windowStartTs),
         'end_time' => date('H:i:s', $windowEndTs),
+        'crosses_midnight' => $crossesMidnight,
     ];
 }
 
@@ -378,25 +388,36 @@ try {
     $currentTime = date('H:i:s');
     $isPmSession = ((int)date('G')) >= 12;
     $weekday = (int)date('N');
+
     $schedule = getStudentSchedule($mysqli, $sectionId > 0 ? $sectionId : null, $weekday);
-    if ($schedule === null) {
+    $scanWindow = $schedule !== null ? resolveScanWindow($currentDate, $schedule) : null;
+
+    // If there is no usable schedule for today, allow spillover from yesterday's overnight schedule.
+    if ($schedule === null || $scanWindow === null) {
+        $previousWeekday = $weekday === 1 ? 7 : ($weekday - 1);
+        $previousDate = date('Y-m-d', strtotime($currentDate . ' -1 day'));
+        $previousSchedule = getStudentSchedule($mysqli, $sectionId > 0 ? $sectionId : null, $previousWeekday);
+        $previousWindow = $previousSchedule !== null ? resolveScanWindow($previousDate, $previousSchedule) : null;
+        $eventTs = strtotime($currentDate . ' ' . $currentTime);
+
+        $canUsePreviousOvernight =
+            $previousSchedule !== null &&
+            $previousWindow !== null &&
+            !empty($previousWindow['crosses_midnight']) &&
+            $eventTs !== false &&
+            $eventTs >= (int)$previousWindow['start_ts'] &&
+            $eventTs <= (int)$previousWindow['end_ts'];
+
+        if ($canUsePreviousOvernight) {
+            $schedule = $previousSchedule;
+            $scanWindow = $previousWindow;
+        }
+    }
+
+    if ($schedule === null || $scanWindow === null) {
         api_response(200, [
             'success' => false,
             'message' => 'Attendance not allowed: no schedule configured for this section today',
-            'student_id' => $studentId,
-            'student_name' => $studentName,
-            'section_id' => $sectionId > 0 ? $sectionId : null,
-            'weekday' => $weekday,
-            'sensor_id' => $sensorId,
-            'device_id' => $deviceId
-        ]);
-    }
-
-    $scanWindow = resolveScanWindow($currentDate, $schedule);
-    if ($scanWindow === null) {
-        api_response(200, [
-            'success' => false,
-            'message' => 'Attendance not allowed: invalid schedule window',
             'student_id' => $studentId,
             'student_name' => $studentName,
             'section_id' => $sectionId > 0 ? $sectionId : null,
