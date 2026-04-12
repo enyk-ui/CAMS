@@ -2,7 +2,7 @@
 
 Professional fingerprint-based attendance system with ESP8266 integration, role-based web dashboard, and email notifications.
 
-**UI: Blue & White Theme | Compact Collapsed Sidebar | Role-Based Access**
+**UI: Red & Black Theme | Compact Collapsed Sidebar | Role-Based Access**
 
 ## Quick Start
 
