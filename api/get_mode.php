@@ -85,8 +85,19 @@ try {
     }
 
     $totalFingers = 1;
-    if (!empty($command['error_message']) && preg_match('/total_fingers:(\d+)/', (string)$command['error_message'], $m)) {
+    $commandMeta = (string)($command['error_message'] ?? '');
+    if ($commandMeta !== '' && preg_match('/total_fingers:(\d+)/', $commandMeta, $m)) {
         $totalFingers = max(1, (int)$m[1]);
+    }
+
+    $uiStatus = '';
+    if ($commandMeta !== '' && preg_match('/ui_status:([^|]+)/', $commandMeta, $m)) {
+        $uiStatus = trim((string)$m[1]);
+    }
+
+    $uiMessage = '';
+    if ($commandMeta !== '' && preg_match('/ui_message:([^|]+)/', $commandMeta, $m)) {
+        $uiMessage = trim((string)$m[1]);
     }
 
     $scanStep = $command['scan_step'] !== null ? (int)$command['scan_step'] : 0;
@@ -101,7 +112,9 @@ try {
         'scan_step' => $scanStep,
         'total_scan_steps' => $totalScanSteps,
         'message' => 'Waiting for scan...',
-        'last_sensor_id' => $lastSensorId
+        'last_sensor_id' => $lastSensorId,
+        'ui_status' => $uiStatus,
+        'ui_message' => $uiMessage
     ]);
 } catch (Throwable $e) {
     api_response(500, [

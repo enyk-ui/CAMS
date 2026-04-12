@@ -109,16 +109,10 @@ function ensureTeacherScheduleSchema(mysqli $mysqli): void
     );
 }
 
-function getStudentSchedule(mysqli $mysqli, ?int $sectionId, int $weekday): array
+function getStudentSchedule(mysqli $mysqli, ?int $sectionId, int $weekday): ?array
 {
-    $fallback = [
-        'time_in' => ATTENDANCE_DEFAULT_START_TIME,
-        'time_out' => ATTENDANCE_DEFAULT_END_TIME,
-        'late_threshold_minutes' => ATTENDANCE_DEFAULT_LATE_THRESHOLD_MINUTES,
-    ];
-
-    if ($sectionId === null || $sectionId <= 0 || $weekday < 1 || $weekday > 5) {
-        return $fallback;
+    if ($sectionId === null || $sectionId <= 0 || $weekday < 1 || $weekday > 7) {
+        return null;
     }
 
     // Preferred: section-specific schedule rows.
@@ -129,7 +123,7 @@ function getStudentSchedule(mysqli $mysqli, ?int $sectionId, int $weekday): arra
          LIMIT 1'
     );
     if (!$stmt) {
-        return $fallback;
+        return null;
     }
 
     $stmt->bind_param('ii', $sectionId, $weekday);
@@ -147,7 +141,7 @@ function getStudentSchedule(mysqli $mysqli, ?int $sectionId, int $weekday): arra
              LIMIT 1'
         );
         if (!$stmt) {
-            return $fallback;
+            return null;
         }
 
         $stmt->bind_param('ii', $sectionId, $weekday);
@@ -157,7 +151,7 @@ function getStudentSchedule(mysqli $mysqli, ?int $sectionId, int $weekday): arra
     }
 
     if (!$row) {
-        return $fallback;
+        return null;
     }
 
     $timeIn = trim((string)($row['start_time'] ?? ''));
@@ -385,31 +379,50 @@ try {
     $isPmSession = ((int)date('G')) >= 12;
     $weekday = (int)date('N');
     $schedule = getStudentSchedule($mysqli, $sectionId > 0 ? $sectionId : null, $weekday);
-    $scanWindow = resolveScanWindow($currentDate, $schedule);
+    if ($schedule === null) {
+        api_response(200, [
+            'success' => false,
+            'message' => 'Attendance not allowed: no schedule configured for this section today',
+            'student_id' => $studentId,
+            'student_name' => $studentName,
+            'section_id' => $sectionId > 0 ? $sectionId : null,
+            'weekday' => $weekday,
+            'sensor_id' => $sensorId,
+            'device_id' => $deviceId
+        ]);
+    }
 
-    if ($scanWindow !== null) {
-        $eventTs = strtotime($currentDate . ' ' . $currentTime);
-        if ($eventTs === false || $eventTs < (int)$scanWindow['start_ts'] || $eventTs > (int)$scanWindow['end_ts']) {
-            api_response(200, [
-                'success' => false,
-                'message' => 'Outside allowed schedule window',
-                'student_id' => $studentId,
-                'student_name' => $studentName,
-                'time' => $currentTime,
-                'allowed_window' => [
-                    'from' => (string)$scanWindow['start_time'],
-                    'to' => (string)$scanWindow['end_time'],
-                ],
-                'schedule' => [
-                    'day' => $weekday,
-                    'time_in' => $schedule['time_in'],
-                    'time_out' => $schedule['time_out'],
-                    'late_threshold_minutes' => (int)$schedule['late_threshold_minutes'],
-                ],
-                'sensor_id' => $sensorId,
-                'device_id' => $deviceId,
-            ]);
-        }
+    $scanWindow = resolveScanWindow($currentDate, $schedule);
+    if ($scanWindow === null) {
+        api_response(200, [
+            'success' => false,
+            'message' => 'Attendance not allowed: invalid schedule window',
+            'student_id' => $studentId,
+            'student_name' => $studentName,
+            'section_id' => $sectionId > 0 ? $sectionId : null,
+            'weekday' => $weekday,
+            'sensor_id' => $sensorId,
+            'device_id' => $deviceId
+        ]);
+    }
+
+    $eventTs = strtotime($currentDate . ' ' . $currentTime);
+    $outsideWindow = $eventTs === false || $eventTs < (int)$scanWindow['start_ts'] || $eventTs > (int)$scanWindow['end_ts'];
+    if ($outsideWindow) {
+        api_response(200, [
+            'success' => false,
+            'message' => 'Attendance not allowed at this time',
+            'student_id' => $studentId,
+            'student_name' => $studentName,
+            'section_id' => $sectionId > 0 ? $sectionId : null,
+            'weekday' => $weekday,
+            'allowed_window' => [
+                'start_time' => (string)$scanWindow['start_time'],
+                'end_time' => (string)$scanWindow['end_time']
+            ],
+            'sensor_id' => $sensorId,
+            'device_id' => $deviceId
+        ]);
     }
 
     $attendanceStmt = $mysqli->prepare('SELECT * FROM attendance WHERE student_id = ? AND attendance_date = ? LIMIT 1');
@@ -454,7 +467,6 @@ try {
     $updateSql = '';
     $updateParams = [];
     $updateTypes = '';
-
     if (!$isPmSession) {
         if (empty($attendance['time_in_am'])) {
             $actionLabel = 'IN (AM)';
@@ -559,6 +571,7 @@ try {
         'attendance_action' => $actionLabel,
         'time' => $currentTime,
         'status' => $notificationStatus,
+        'outside_window' => $outsideWindow,
         'attendance_summary' => $attendanceSummary,
         'schedule' => [
             'day' => $weekday,

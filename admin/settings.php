@@ -198,6 +198,21 @@ function fetchSectionTeacherSchedules(mysqli $mysqli): array
     return $rows;
 }
 
+function resolveResetDeviceId(mysqli $mysqli): int
+{
+    $stmt = $mysqli->prepare('SELECT id FROM devices WHERE is_active = 1 ORDER BY id ASC LIMIT 1');
+    if ($stmt) {
+        $stmt->execute();
+        $device = $stmt->get_result()->fetch_assoc();
+        $stmt->close();
+        if ($device) {
+            return (int)$device['id'];
+        }
+    }
+
+    return 1;
+}
+
 $message = '';
 $message_type = '';
 
@@ -212,6 +227,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $action = $_POST['action'] ?? 'save_section_schedule';
 
     if ($action === 'save_section_schedule') {
+        $scheduleId = (int)($_POST['schedule_id'] ?? 0);
         $sectionId = (int)($_POST['section_id'] ?? 0);
         $dayOfWeek = (int)($_POST['day_of_week'] ?? 0);
         $startTime = trim((string)($_POST['start_time'] ?? ''));
@@ -240,19 +256,31 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $startTimeFull = $startTime . ':00';
                 $endTimeFull = $endTime . ':00';
 
-                $stmt = $mysqli->prepare(
-                    "INSERT INTO teacher_daily_schedules (teacher_id, section_id, day_of_week, start_time, end_time, late_threshold_minutes)
-                     VALUES (?, ?, ?, ?, ?, ?)
-                     ON DUPLICATE KEY UPDATE
-                        start_time = VALUES(start_time),
-                        end_time = VALUES(end_time),
-                        late_threshold_minutes = VALUES(late_threshold_minutes),
-                        updated_at = CURRENT_TIMESTAMP"
-                );
-                $stmt->bind_param('iiissi', $teacherId, $sectionId, $dayOfWeek, $startTimeFull, $endTimeFull, $lateThreshold);
+                if ($scheduleId > 0) {
+                    $stmt = $mysqli->prepare(
+                        'UPDATE teacher_daily_schedules
+                         SET teacher_id = ?, section_id = ?, day_of_week = ?, start_time = ?, end_time = ?, late_threshold_minutes = ?, updated_at = CURRENT_TIMESTAMP
+                         WHERE id = ?
+                         LIMIT 1'
+                    );
+                    $stmt->bind_param('iiissii', $teacherId, $sectionId, $dayOfWeek, $startTimeFull, $endTimeFull, $lateThreshold, $scheduleId);
+                    $savedMessage = 'Section-teacher schedule updated successfully.';
+                } else {
+                    $stmt = $mysqli->prepare(
+                        "INSERT INTO teacher_daily_schedules (teacher_id, section_id, day_of_week, start_time, end_time, late_threshold_minutes)
+                         VALUES (?, ?, ?, ?, ?, ?)
+                         ON DUPLICATE KEY UPDATE
+                            start_time = VALUES(start_time),
+                            end_time = VALUES(end_time),
+                            late_threshold_minutes = VALUES(late_threshold_minutes),
+                            updated_at = CURRENT_TIMESTAMP"
+                    );
+                    $stmt->bind_param('iiissi', $teacherId, $sectionId, $dayOfWeek, $startTimeFull, $endTimeFull, $lateThreshold);
+                    $savedMessage = 'Section-teacher schedule saved successfully.';
+                }
 
                 if ($stmt->execute()) {
-                    $message = 'Section-teacher schedule saved successfully.';
+                    $message = $savedMessage;
                     $message_type = 'success';
                 } else {
                     $message = 'Unable to save schedule: ' . $stmt->error;
@@ -277,6 +305,33 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $message_type = 'danger';
             }
             $stmt->close();
+        }
+    } elseif ($action === 'reset_sensor_records') {
+        $deviceId = resolveResetDeviceId($mysqli);
+
+        $mysqli->begin_transaction();
+        try {
+            $cancelEnrollStmt = $mysqli->prepare("UPDATE device_commands SET status = 'FAILED', error_message = 'Sensor reset requested' WHERE status IN ('PENDING', 'IN_PROGRESS') AND mode = 'ENROLL' AND device_id = ?");
+            $cancelEnrollStmt->bind_param('i', $deviceId);
+            $cancelEnrollStmt->execute();
+            $cancelEnrollStmt->close();
+
+            $deleteStmt = $mysqli->prepare("INSERT INTO device_commands (device_id, mode, sensor_id, status, error_message) VALUES (?, 'DELETE', 0, 'PENDING', 'Reset all sensor fingerprints')");
+            $deleteStmt->bind_param('i', $deviceId);
+            $deleteStmt->execute();
+            $deleteStmt->close();
+
+            $deleteAllStmt = $mysqli->prepare('DELETE FROM fingerprints');
+            $deleteAllStmt->execute();
+            $deleteAllStmt->close();
+
+            $mysqli->commit();
+            $message = 'Sensor reset queued. The scanner will clear all stored templates.';
+            $message_type = 'success';
+        } catch (Throwable $resetError) {
+            $mysqli->rollback();
+            $message = 'Unable to reset sensor records: ' . $resetError->getMessage();
+            $message_type = 'danger';
         }
     } elseif ($action === 'set_active_school_year') {
         $schoolYearId = (int) ($_POST['school_year_id'] ?? 0);
@@ -539,6 +594,7 @@ if (ensureUsersAdminSchema($mysqli)) {
                     <table class="table table-sm table-hover mb-0">
                         <thead class="table-light">
                             <tr>
+                                <th>#</th>
                                 <th>Section</th>
                                 <th>Teacher</th>
                                 <th>Day</th>
@@ -551,11 +607,12 @@ if (ensureUsersAdminSchema($mysqli)) {
                         <tbody>
                             <?php if (empty($sectionTeacherSchedules)): ?>
                                 <tr>
-                                    <td colspan="7" class="text-center text-muted py-3">No section-teacher schedules configured.</td>
+                                    <td colspan="8" class="text-center text-muted py-3">No section-teacher schedules configured.</td>
                                 </tr>
                             <?php else: ?>
-                                <?php foreach ($sectionTeacherSchedules as $row): ?>
+                                <?php foreach ($sectionTeacherSchedules as $index => $row): ?>
                                     <tr>
+                                        <td><?php echo $index + 1; ?></td>
                                         <td><?php echo htmlspecialchars(trim((string)$row['year_grade']) . ' - ' . trim((string)$row['section_name'])); ?></td>
                                         <td><?php echo htmlspecialchars((string)$row['teacher_name']); ?></td>
                                         <td><?php echo htmlspecialchars($dayLabels[(int)$row['day_of_week']] ?? ('Day ' . (int)$row['day_of_week'])); ?></td>
@@ -563,6 +620,20 @@ if (ensureUsersAdminSchema($mysqli)) {
                                         <td><?php echo htmlspecialchars(substr((string)$row['end_time'], 0, 5)); ?></td>
                                         <td><?php echo (int)$row['late_threshold_minutes']; ?></td>
                                         <td>
+                                            <button
+                                                type="button"
+                                                class="btn btn-sm btn-outline-primary me-2 edit-schedule-btn"
+                                                data-bs-toggle="modal"
+                                                data-bs-target="#editScheduleModal"
+                                                data-schedule-id="<?php echo (int)$row['id']; ?>"
+                                                data-section-id="<?php echo (int)$row['section_id']; ?>"
+                                                data-day-of-week="<?php echo (int)$row['day_of_week']; ?>"
+                                                data-start-time="<?php echo htmlspecialchars(substr((string)$row['start_time'], 0, 5)); ?>"
+                                                data-end-time="<?php echo htmlspecialchars(substr((string)$row['end_time'], 0, 5)); ?>"
+                                                data-late-threshold="<?php echo (int)$row['late_threshold_minutes']; ?>"
+                                            >
+                                                Edit
+                                            </button>
                                             <form method="POST" class="d-inline" onsubmit="return confirm('Delete this schedule?');">
                                                 <input type="hidden" name="action" value="delete_section_schedule">
                                                 <input type="hidden" name="schedule_id" value="<?php echo (int)$row['id']; ?>">
@@ -580,6 +651,73 @@ if (ensureUsersAdminSchema($mysqli)) {
     </div>
 </div>
 
+<div class="modal fade" id="editScheduleModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-lg modal-dialog-centered">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title"><i class="bi bi-pencil-square"></i> Update Schedule</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <form method="POST">
+                <div class="modal-body">
+                    <input type="hidden" name="action" value="save_section_schedule">
+                    <input type="hidden" name="schedule_id" id="edit_schedule_id" value="0">
+
+                    <div class="row g-3">
+                        <div class="col-md-6">
+                            <label for="edit_section_id" class="form-label">Section (Teacher Assigned)</label>
+                            <select class="form-select" id="edit_section_id" name="section_id" required>
+                                <option value="">Select section</option>
+                                <?php foreach ($teacherSectionAssignments as $assignment): ?>
+                                    <?php
+                                    $sectionLabel = trim((string)($assignment['year_grade'] ?? '')) . ' - ' . trim((string)($assignment['section_name'] ?? ''));
+                                    $teacherLabel = trim((string)($assignment['teacher_name'] ?? 'Teacher'));
+                                    ?>
+                                    <option value="<?php echo (int)$assignment['section_id']; ?>">
+                                        <?php echo htmlspecialchars($sectionLabel . ' | ' . $teacherLabel); ?>
+                                    </option>
+                                <?php endforeach; ?>
+                            </select>
+                        </div>
+
+                        <div class="col-md-6">
+                            <label for="edit_day_of_week" class="form-label">Day</label>
+                            <select class="form-select" id="edit_day_of_week" name="day_of_week" required>
+                                <option value="1">Monday</option>
+                                <option value="2">Tuesday</option>
+                                <option value="3">Wednesday</option>
+                                <option value="4">Thursday</option>
+                                <option value="5">Friday</option>
+                            </select>
+                        </div>
+
+                        <div class="col-md-4">
+                            <label for="edit_start_time" class="form-label">Time In</label>
+                            <input type="time" class="form-control" id="edit_start_time" name="start_time" value="08:00" required>
+                        </div>
+
+                        <div class="col-md-4">
+                            <label for="edit_end_time" class="form-label">Time Out</label>
+                            <input type="time" class="form-control" id="edit_end_time" name="end_time" value="17:00" required>
+                        </div>
+
+                        <div class="col-md-4">
+                            <label for="edit_late_threshold_minutes" class="form-label">Late (mins)</label>
+                            <input type="number" class="form-control" id="edit_late_threshold_minutes" name="late_threshold_minutes" value="15" min="0" max="120" required>
+                        </div>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                    <button type="submit" class="btn btn-primary">
+                        <i class="bi bi-check-circle"></i> Update Schedule
+                    </button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+
 <div class="row mt-4">
     <div class="col-lg-12 mb-4">
         <div class="card">
@@ -591,6 +729,7 @@ if (ensureUsersAdminSchema($mysqli)) {
                     <table class="table table-sm table-hover mb-0">
                         <thead class="table-light">
                             <tr>
+                                <th>#</th>
                                 <th>Label</th>
                                 <th>Start</th>
                                 <th>End</th>
@@ -601,11 +740,12 @@ if (ensureUsersAdminSchema($mysqli)) {
                         <tbody>
                             <?php if (empty($schoolYears)): ?>
                                 <tr>
-                                    <td colspan="5" class="text-center text-muted py-3">No school years found</td>
+                                    <td colspan="6" class="text-center text-muted py-3">No school years found</td>
                                 </tr>
                             <?php else: ?>
-                                <?php foreach ($schoolYears as $sy): ?>
+                                <?php foreach ($schoolYears as $index => $sy): ?>
                                     <tr>
+                                        <td><?php echo $index + 1; ?></td>
                                         <td><strong><?php echo htmlspecialchars($sy['label']); ?></strong></td>
                                         <td><?php echo htmlspecialchars($sy['start_date']); ?></td>
                                         <td><?php echo htmlspecialchars($sy['end_date']); ?></td>
@@ -661,6 +801,25 @@ if (ensureUsersAdminSchema($mysqli)) {
                             <i class="bi bi-plus-circle"></i> Add School Year
                         </button>
                     </div>
+                </form>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="row mt-4">
+    <div class="col-lg-12 mb-4">
+        <div class="card border-danger">
+            <div class="card-header bg-danger text-white">
+                <h5 class="mb-0"><i class="bi bi-arrow-repeat"></i> Sensor Finger Records</h5>
+            </div>
+            <div class="card-body">
+                <p class="text-muted mb-3">Queues delete commands for every stored fingerprint, removes the saved fingerprint rows, and returns the scanner to IDLE.</p>
+                <form method="POST" onsubmit="return confirm('Reset all sensor fingerprint records? This will clear stored fingerprints and queue delete commands to the scanner.');">
+                    <input type="hidden" name="action" value="reset_sensor_records">
+                    <button type="submit" class="btn btn-danger">
+                        <i class="bi bi-trash3"></i> Reset All Sensor Fingerprints
+                    </button>
                 </form>
             </div>
         </div>
@@ -731,6 +890,32 @@ if (ensureUsersAdminSchema($mysqli)) {
     .btn-lg {
         padding: 12px 30px;
     }
+
+    .table thead th {
+        white-space: nowrap;
+    }
 </style>
+
+<script>
+document.addEventListener('DOMContentLoaded', function () {
+    const editScheduleId = document.getElementById('edit_schedule_id');
+    const editSectionSelect = document.getElementById('edit_section_id');
+    const editDaySelect = document.getElementById('edit_day_of_week');
+    const editStartInput = document.getElementById('edit_start_time');
+    const editEndInput = document.getElementById('edit_end_time');
+    const editLateInput = document.getElementById('edit_late_threshold_minutes');
+
+    document.querySelectorAll('.edit-schedule-btn').forEach((button) => {
+        button.addEventListener('click', function () {
+            if (editScheduleId) editScheduleId.value = this.dataset.scheduleId || '0';
+            if (editSectionSelect) editSectionSelect.value = this.dataset.sectionId || '';
+            if (editDaySelect) editDaySelect.value = this.dataset.dayOfWeek || '1';
+            if (editStartInput) editStartInput.value = this.dataset.startTime || '08:00';
+            if (editEndInput) editEndInput.value = this.dataset.endTime || '17:00';
+            if (editLateInput) editLateInput.value = this.dataset.lateThreshold || '15';
+        });
+    });
+});
+</script>
 
 <?php require '../includes/footer.php'; ?>

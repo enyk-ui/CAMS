@@ -389,35 +389,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             <div class="modal-body p-4">
                 <div class="mb-3">
                     <h6>Student: <span id="studentName" class="text-primary"></span></h6>
-                    <p class="text-muted">Update fingerprint data for this student</p>
+                    <p class="text-muted">Single-fingerprint update is enforced and starts automatically.</p>
                 </div>
 
-                <!-- Step 1: Select Number of Fingers -->
                 <div id="step1SelectFingers">
-                    <h5 class="mb-4 text-center">How many fingers do you want to enroll?</h5>
-                    <p class="text-muted text-center mb-4">Each finger will be scanned <strong>5 times</strong> for accuracy</p>
-                    
-                    <div class="finger-selector">
-                        <button type="button" class="finger-btn" data-fingers="1">
-                            <i class="bi bi-hand-index-thumb"></i>
-                            <span>1 Finger</span>
-                        </button>
-                        <button type="button" class="finger-btn" data-fingers="2">
-                            <i class="bi bi-hand-index-thumb"></i>
-                            <span>2 Fingers</span>
-                        </button>
-                        <button type="button" class="finger-btn" data-fingers="3">
-                            <i class="bi bi-hand-index-thumb"></i>
-                            <span>3 Fingers</span>
-                        </button>
-                        <button type="button" class="finger-btn" data-fingers="4">
-                            <i class="bi bi-hand-index-thumb"></i>
-                            <span>4 Fingers</span>
-                        </button>
-                        <button type="button" class="finger-btn" data-fingers="5">
-                            <i class="bi bi-hand-index-thumb"></i>
-                            <span>5 Fingers</span>
-                        </button>
+                    <div class="alert alert-info mb-0">
+                        Enrollment starts automatically.
                     </div>
                 </div>
 
@@ -431,6 +408,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     </div>
 
                     <div class="d-flex justify-content-center gap-3 flex-wrap mb-4" id="scanCirclesContainer"></div>
+
+                    <div id="scanStatusInline" class="scan-status waiting mb-3" role="status" aria-live="polite">
+                        <i id="scanStatusIcon" class="bi bi-hourglass-split"></i>
+                        <span id="scanStatusInlineText">Waiting for next scan...</span>
+                    </div>
 
                     <div class="mb-3">
                         <div class="progress" style="height: 10px;">
@@ -447,11 +429,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                                 <small id="statusText">Waiting for scan...</small>
                             </div>
                         </div>
-                    </div>
-
-                    <div class="alert alert-secondary mb-4" id="debugMessage" style="display:none;">
-                        <strong>Debug Log</strong>
-                        <div id="debugText" style="font-family: monospace; font-size: 0.85rem; white-space: pre-wrap;"></div>
                     </div>
 
                     <div class="d-flex justify-content-between">
@@ -579,6 +556,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 .scan-circle.error {
     border-color: #ef4444;
     background: #fef2f2;
+    box-shadow: 0 0 0 4px rgba(239, 68, 68, 0.15);
+    animation: duplicatePulse 0.7s infinite alternate;
 }
 
 .scan-circle.error i {
@@ -590,10 +569,47 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     50% { transform: scale(1.1); }
 }
 
+@keyframes duplicatePulse {
+    0% { transform: scale(1); }
+    100% { transform: scale(1.08); }
+}
+
 .enrollment-header {
     text-align: center;
     border-bottom: 1px solid #e5e7eb;
     padding-bottom: 15px;
+}
+
+.scan-status {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    border: 2px solid #d1d5db;
+    border-radius: 12px;
+    padding: 10px 14px;
+    font-weight: 600;
+}
+
+.scan-status i {
+    font-size: 1.05rem;
+}
+
+.scan-status.waiting {
+    background: #eff6ff;
+    border-color: #93c5fd;
+    color: #1e40af;
+}
+
+.scan-status.success {
+    background: #ecfdf5;
+    border-color: #86efac;
+    color: #065f46;
+}
+
+.scan-status.error {
+    background: #fef2f2;
+    border-color: #fca5a5;
+    color: #991b1b;
 }
 
 .scan-step-indicators {
@@ -684,7 +700,7 @@ let updateState = {
     modal: null,
     studentId: null,
     studentName: '',
-    numFingers: 0,
+    numFingers: 1,
     currentFinger: 1,
     enrolledFingerprints: [],
     fingerprintsChanged: false,
@@ -697,7 +713,10 @@ let updateState = {
     pollFailures: 0,
     scanStepsPerFinger: 3,
     currentScanStep: 1,
-    lastProgressSnapshot: ''
+    lastProgressSnapshot: '',
+    duplicateNoticeUntil: 0,
+    duplicateActive: false,
+    statusAutoHideTimer: null
 };
 
 // Initialize modal when page loads
@@ -713,17 +732,6 @@ document.addEventListener('DOMContentLoaded', function() {
     updateState.modal = new bootstrap.Modal(document.getElementById('fingerprintModal'));
     updateModeIndicator('attendance');
     renderScanCircles(1);
-    
-    // Finger selection buttons
-    document.querySelectorAll('.finger-btn').forEach(btn => {
-        btn.addEventListener('click', function() {
-            document.querySelectorAll('.finger-btn').forEach(b => b.classList.remove('selected'));
-            this.classList.add('selected');
-            updateState.numFingers = parseInt(this.dataset.fingers, 10);
-            
-            setTimeout(() => startEnrollment(), 250);
-        });
-    });
     
     // Cancel button
     document.getElementById('btnCancelEnrollment').addEventListener('click', function() {
@@ -743,6 +751,10 @@ document.addEventListener('DOMContentLoaded', function() {
     document.getElementById('fingerprintModal').addEventListener('shown.bs.modal', function() {
         setScannerMode('registration');
         updateModeIndicator('registration');
+
+        if (updateState.studentId && !updateState.registrationId && !updateState.enrollmentCompleted) {
+            setTimeout(() => startEnrollment(), 150);
+        }
     });
     
     // Reset modal when closed
@@ -842,6 +854,57 @@ function updateScanStepIndicators() {
     container.innerHTML = html;
 }
 
+function setInlineScanStatus(type, message) {
+    const statusInline = document.getElementById('scanStatusInline');
+    const statusText = document.getElementById('scanStatusInlineText');
+    const statusIcon = document.getElementById('scanStatusIcon');
+
+    if (!statusInline || !statusText || !statusIcon) {
+        return;
+    }
+
+    const safeType = ['waiting', 'success', 'error'].includes(type) ? type : 'waiting';
+
+    if (safeType !== 'error' && updateState.statusAutoHideTimer) {
+        clearTimeout(updateState.statusAutoHideTimer);
+        updateState.statusAutoHideTimer = null;
+    }
+
+    statusInline.className = `scan-status ${safeType} mb-3`;
+    statusText.textContent = message || 'Waiting for next scan...';
+
+    if (safeType === 'success') {
+        statusIcon.className = 'bi bi-check-circle-fill';
+    } else if (safeType === 'error') {
+        statusIcon.className = 'bi bi-exclamation-triangle-fill';
+    } else {
+        statusIcon.className = 'bi bi-hourglass-split';
+    }
+
+    if (safeType === 'error') {
+        if (updateState.statusAutoHideTimer) {
+            clearTimeout(updateState.statusAutoHideTimer);
+        }
+
+        updateState.statusAutoHideTimer = setTimeout(() => {
+            updateState.duplicateActive = false;
+            updateState.duplicateNoticeUntil = 0;
+
+            const topStatus = document.getElementById('statusMessage');
+            const topStatusText = document.getElementById('statusText');
+            if (topStatus && (topStatus.className.includes('alert-warning') || topStatus.className.includes('alert-danger'))) {
+                topStatus.className = 'alert alert-info mb-4';
+            }
+            if (topStatusText) {
+                topStatusText.textContent = 'Waiting for scanner to process enrollment command...';
+            }
+
+            setInlineScanStatus('waiting', 'Waiting for next scan...');
+            updateProgress();
+        }, 5000);
+    }
+}
+
 function formatEnrollmentUiError(message) {
     const raw = String(message || '').trim();
     const lower = raw.toLowerCase();
@@ -881,13 +944,12 @@ function startEnrollment() {
     renderScanCircles(updateState.numFingers);
     updateProgress();
     
-    checkScannerOnline(true).then((isOnline) => {
+    checkScannerOnline(false).then((isOnline) => {
         if (!isOnline) {
-            showError('Scanner offline. Retry when scanner is online.');
-            return null;
+            showWaitingMessage('Scanner status is offline/uncertain. Trying enrollment command anyway...');
+        } else {
+            showWaitingMessage('Sending registration command to scanner...');
         }
-
-        showWaitingMessage('Sending registration command to scanner...');
         appendDebug('Calling register API (start action)');
         return fetch('../api/register.php', {
             method: 'POST',
@@ -988,6 +1050,36 @@ function beginEnrollmentMonitor() {
                 const serverFinger = Math.max(1, parseInt(data.finger_number || 1, 10));
                 const serverScanStep = parseInt(data.scan_step || 0, 10);
                 const totalScanSteps = parseInt(data.total_scan_steps || 3, 10);
+                const uiStatus = String(data.ui_status || '').trim().toLowerCase();
+                const uiMessage = String(data.ui_message || '').trim();
+
+                if (uiStatus === 'duplicate') {
+                    const duplicateMsg = uiMessage || 'Duplicate finger already enrolled. Use another finger.';
+                    updateState.duplicateActive = true;
+                    updateState.duplicateNoticeUntil = Date.now() + 5000;
+                    const statusDiv = document.getElementById('statusMessage');
+                    const statusText = document.getElementById('statusText');
+                    if (statusDiv) {
+                        statusDiv.className = 'alert alert-warning mb-4';
+                    }
+                    if (statusText) {
+                        statusText.textContent = duplicateMsg;
+                    }
+                    setInlineScanStatus('error', duplicateMsg);
+
+                    const duplicateCircle = document.getElementById(`scan${serverFinger}`);
+                    if (duplicateCircle && !duplicateCircle.classList.contains('success')) {
+                        duplicateCircle.classList.remove('scanning');
+                        duplicateCircle.classList.add('error');
+                        duplicateCircle.innerHTML = '<i class="bi bi-exclamation-lg"></i>';
+                    }
+                } else {
+                    updateState.duplicateActive = false;
+                    const statusDiv = document.getElementById('statusMessage');
+                    if (statusDiv && statusDiv.className.indexOf('alert-warning') !== -1) {
+                        statusDiv.className = 'alert alert-info mb-4';
+                    }
+                }
 
                 const snapshot = `${String(data.mode)}:${serverFinger}:${serverScanStep}:${String(data.last_sensor_id || '')}`;
                 if (snapshot !== updateState.lastProgressSnapshot) {
@@ -1019,6 +1111,11 @@ function beginEnrollmentMonitor() {
             }
 
             if (data.mode === 'failed') {
+                if (updateState.monitorHandle) {
+                    clearInterval(updateState.monitorHandle);
+                    updateState.monitorHandle = null;
+                }
+
                 const rawError = data.message || 'Enrollment failed on scanner. Please retry enrollment.';
                 const uiError = formatEnrollmentUiError(rawError);
 
@@ -1065,6 +1162,12 @@ function markFingerCompleted(fingerNo) {
         updateState.enrolledFingerprints.push({ finger: fingerNo, scans: 1 });
     }
 
+    if (fingerNo >= updateState.numFingers) {
+        setInlineScanStatus('success', `Success: finger ${fingerNo} of ${updateState.numFingers} registered.`);
+    } else {
+        setInlineScanStatus('success', `Success: finger ${fingerNo} saved. Waiting for next scan...`);
+    }
+
     updateOverallProgress();
 }
 
@@ -1081,14 +1184,23 @@ function updateProgress() {
 
     document.querySelectorAll('.scan-circle').forEach(circle => {
         if (!circle.classList.contains('success')) {
-            circle.classList.remove('scanning', 'error');
-            circle.innerHTML = '<i class="bi bi-fingerprint"></i>';
+            const isCurrentCircle = Number(circle.dataset.finger) === Number(updateState.currentFinger);
+            if (!(updateState.duplicateActive && isCurrentCircle)) {
+                circle.classList.remove('scanning', 'error');
+                circle.innerHTML = '<i class="bi bi-fingerprint"></i>';
+            }
         }
     });
     
     const currentCircle = document.getElementById(`scan${updateState.currentFinger}`);
     if (currentCircle && !currentCircle.classList.contains('success')) {
-        currentCircle.classList.add('scanning');
+        if (updateState.duplicateActive) {
+            currentCircle.classList.remove('scanning');
+            currentCircle.classList.add('error');
+            currentCircle.innerHTML = '<i class="bi bi-exclamation-lg"></i>';
+        } else {
+            currentCircle.classList.add('scanning');
+        }
     }
 
     const statusText = document.getElementById('statusText');
@@ -1179,6 +1291,10 @@ function showWaitingMessage(message) {
     if (statusDiv) {
         statusDiv.className = 'alert alert-info mb-4';
     }
+
+    if (!updateState.duplicateActive) {
+        setInlineScanStatus('waiting', message || 'Waiting for next scan...');
+    }
 }
 
 function showError(message) {
@@ -1189,27 +1305,40 @@ function showError(message) {
             <div>
                 <i class="bi bi-exclamation-triangle me-2"></i>${message}
             </div>
-            <button type="button" class="btn btn-sm btn-outline-danger" onclick="startEnrollment()">
+            <button type="button" class="btn btn-sm btn-outline-danger" onclick="handleRetryFromError(this)">
                 <i class="bi bi-arrow-clockwise me-1"></i>Retry
             </button>
         </div>
     `;
     appendDebug('ERROR: ' + message);
+    setInlineScanStatus('error', `Error: ${message}. Try again.`);
+}
+
+function handleRetryFromError(retryBtn) {
+    if (retryBtn) {
+        retryBtn.disabled = true;
+        retryBtn.style.display = 'none';
+    }
+
+    startEnrollment();
 }
 
 function resetModal() {
     if (updateState.monitorHandle) {
         clearInterval(updateState.monitorHandle);
     }
+    if (updateState.statusAutoHideTimer) {
+        clearTimeout(updateState.statusAutoHideTimer);
+        updateState.statusAutoHideTimer = null;
+    }
 
-    document.getElementById('step1SelectFingers').style.display = 'block';
+    document.getElementById('step1SelectFingers').style.display = 'none';
     document.getElementById('step2EnrollmentProgress').style.display = 'none';
     document.getElementById('step3Complete').style.display = 'none';
-    
-    document.querySelectorAll('.finger-btn').forEach(b => b.classList.remove('selected'));
+
     renderScanCircles(1);
-    
-    updateState.numFingers = 0;
+
+    updateState.numFingers = 1;
     updateState.currentFinger = 1;
     updateState.enrolledFingerprints = [];
     updateState.fingerprintsChanged = false;
@@ -1221,45 +1350,19 @@ function resetModal() {
     updateState.pollFailures = 0;
     updateState.currentScanStep = 1;
     updateState.lastProgressSnapshot = '';
+    updateState.duplicateNoticeUntil = 0;
+    updateState.duplicateActive = false;
     updateState.debugLines = [];
 
     updateOverallProgress();
     updateScanStepIndicators();
 
-    const debugBox = document.getElementById('debugMessage');
-    const debugText = document.getElementById('debugText');
-    if (debugBox) {
-        debugBox.style.display = 'none';
-    }
-    if (debugText) {
-        debugText.textContent = '';
-    }
+    setInlineScanStatus('waiting', 'Waiting for next scan...');
 }
 
 function appendDebug(message, data) {
-    const debugBox = document.getElementById('debugMessage');
-    const debugText = document.getElementById('debugText');
-    if (!debugBox || !debugText) {
-        return;
-    }
-
-    const ts = new Date().toLocaleTimeString();
-    let line = `[${ts}] ${message}`;
-    if (typeof data !== 'undefined') {
-        try {
-            line += `\n${JSON.stringify(data)}`;
-        } catch (e) {
-            line += `\n${String(data)}`;
-        }
-    }
-
-    updateState.debugLines.push(line);
-    if (updateState.debugLines.length > 15) {
-        updateState.debugLines = updateState.debugLines.slice(-15);
-    }
-
-    debugText.textContent = updateState.debugLines.join('\n\n');
-    debugBox.style.display = 'block';
+    // Debug panel intentionally removed from UI.
+    return;
 }
 
 function validateFormSubmission(e) {

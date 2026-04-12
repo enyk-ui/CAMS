@@ -1,17 +1,7 @@
 <?php
-/**
- * Process Notification Queue - Retry Failed Emails
- * Run this via cron job or manually: curl http://localhost/CAMS/process_notifications.php
- *
- * Cron example (every 5 minutes):
- * */5 * * * * curl -s http://localhost/CAMS/process_notifications.php > /dev/null 2>&1
- *
- * Or using PHP's built-in server check interval (set in cron to check every minute)
- */
 
 // Only allow API access or cron requests
 if (php_sapi_name() !== 'cli') {
-    // Via HTTP - check if authorized
     $apiKey = $_GET['api_key'] ?? $_POST['api_key'] ?? '';
     if (empty($apiKey) || $apiKey !== 'your-secret-api-key') {
         header('HTTP/1.1 401 Unauthorized');

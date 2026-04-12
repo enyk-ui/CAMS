@@ -203,15 +203,12 @@ $teacherSectionMap = buildTeacherSectionMap($mysqli, $activeSchoolYearLabel);
             <div class="modal-body p-4">
                 <div class="enrollment-header mb-3">
                     <h5 id="studentName" class="mb-1"></h5>
-                    <p class="text-muted mb-0">Choose how many fingers to register, then place the finger on the scanner.</p>
+                    <p class="text-muted mb-0">Single-fingerprint enrollment is enforced. Place your finger on the scanner.</p>
                 </div>
 
                 <div id="step1SelectFingers">
-                    <div class="fingerprint-selector mb-4">
-                        <button type="button" class="fingerprint-btn finger-btn" data-fingers="1">1</button>
-                    </div>
                     <div class="alert alert-info mb-0">
-                        Single-fingerprint enrollment is enforced.
+                        Enrollment starts automatically.
                     </div>
                 </div>
 
@@ -245,11 +242,6 @@ $teacherSectionMap = buildTeacherSectionMap($mysqli, $activeSchoolYearLabel);
                                 <small id="statusText">Waiting for scan...</small>
                             </div>
                         </div>
-                    </div>
-
-                    <div class="alert alert-secondary mb-4" id="debugMessage" style="display:none;">
-                        <strong>Debug Log</strong>
-                        <div id="debugText" style="font-family: monospace; font-size: 0.85rem; white-space: pre-wrap;"></div>
                     </div>
 
                     <div class="d-flex justify-content-between">
@@ -312,7 +304,7 @@ let updateState = {
     postSaveModal: null,
     studentId: null,
     studentName: '',
-    numFingers: 0,
+    numFingers: 1,
     currentFinger: 1,
     enrolledFingerprints: [],
     registrationId: null,
@@ -330,7 +322,10 @@ let updateState = {
     startRequestedAt: 0,
     scanStepsPerFinger: 3,
     currentScanStep: 1,
-    lastProgressSnapshot: ''
+    lastProgressSnapshot: '',
+    duplicateNoticeUntil: 0,
+    duplicateActive: false,
+    statusAutoHideTimer: null
 };
 
 function setFingerButtonsDisabled(disabled) {
@@ -358,15 +353,6 @@ document.addEventListener('DOMContentLoaded', function () {
         });
         populateSectionOptions(yearSelect.value || '', sectionSelect.value || '');
     }
-
-    document.querySelectorAll('.finger-btn').forEach(btn => {
-        btn.addEventListener('click', function () {
-            document.querySelectorAll('.finger-btn').forEach(b => b.classList.remove('selected'));
-            this.classList.add('selected');
-            updateState.numFingers = parseInt(this.dataset.fingers, 10);
-            setTimeout(() => startEnrollment(), 250);
-        });
-    });
 
     document.getElementById('btnCancelEnrollment').addEventListener('click', function () {
         setScannerMode('attendance');
@@ -402,6 +388,10 @@ document.addEventListener('DOMContentLoaded', function () {
     document.getElementById('fingerprintModal').addEventListener('shown.bs.modal', function () {
         setScannerMode('registration');
         updateModeIndicator('registration');
+
+        if (updateState.studentId && !updateState.registrationId && !updateState.enrollmentCompleted && !updateState.isStartingEnrollment) {
+            setTimeout(() => startEnrollment(), 150);
+        }
     });
 
     document.getElementById('fingerprintModal').addEventListener('hidden.bs.modal', function () {
@@ -678,6 +668,12 @@ function setInlineScanStatus(type, message) {
     }
 
     const safeType = ['waiting', 'success', 'error'].includes(type) ? type : 'waiting';
+
+    if (safeType !== 'error' && updateState.statusAutoHideTimer) {
+        clearTimeout(updateState.statusAutoHideTimer);
+        updateState.statusAutoHideTimer = null;
+    }
+
     statusInline.className = `scan-status ${safeType} mb-3`;
     statusText.textContent = message || 'Waiting for next scan...';
 
@@ -687,6 +683,29 @@ function setInlineScanStatus(type, message) {
         statusIcon.className = 'bi bi-exclamation-triangle-fill';
     } else {
         statusIcon.className = 'bi bi-hourglass-split';
+    }
+
+    if (safeType === 'error') {
+        if (updateState.statusAutoHideTimer) {
+            clearTimeout(updateState.statusAutoHideTimer);
+        }
+
+        updateState.statusAutoHideTimer = setTimeout(() => {
+            updateState.duplicateActive = false;
+            updateState.duplicateNoticeUntil = 0;
+
+            const topStatus = document.getElementById('statusMessage');
+            const topStatusText = document.getElementById('statusText');
+            if (topStatus && (topStatus.className.includes('alert-warning') || topStatus.className.includes('alert-danger'))) {
+                topStatus.className = 'alert alert-info mb-4';
+            }
+            if (topStatusText) {
+                topStatusText.textContent = 'Waiting for scanner to process enrollment command...';
+            }
+
+            setInlineScanStatus('waiting', 'Waiting for next scan...');
+            updateProgress();
+        }, 5000);
     }
 }
 
@@ -794,12 +813,16 @@ async function startEnrollment() {
     })
     .catch(error => {
         updateState.isStartingEnrollment = false;
-        setFingerButtonsDisabled(false);
         showError('Device offline or API unreachable: ' + error.message);
     });
 }
 
-function handleRetryAction() {
+function handleRetryAction(retryBtn) {
+    if (retryBtn) {
+        retryBtn.disabled = true;
+        retryBtn.style.display = 'none';
+    }
+
     if (updateState.isStartingEnrollment) {
         return;
     }
@@ -851,6 +874,36 @@ function beginEnrollmentMonitor() {
                 const serverFinger = Math.max(1, parseInt(data.finger_number || 1, 10));
                 const serverScanStep = parseInt(data.scan_step || 0, 10);
                 const totalScanSteps = parseInt(data.total_scan_steps || 3, 10);
+                const uiStatus = String(data.ui_status || '').trim().toLowerCase();
+                const uiMessage = String(data.ui_message || '').trim();
+
+                if (uiStatus === 'duplicate') {
+                    const duplicateMsg = uiMessage || 'Duplicate finger already enrolled. Use another finger.';
+                    updateState.duplicateActive = true;
+                    updateState.duplicateNoticeUntil = Date.now() + 5000;
+                    const statusDiv = document.getElementById('statusMessage');
+                    const statusText = document.getElementById('statusText');
+                    if (statusDiv) {
+                        statusDiv.className = 'alert alert-warning mb-4';
+                    }
+                    if (statusText) {
+                        statusText.textContent = duplicateMsg;
+                    }
+                    setInlineScanStatus('error', duplicateMsg);
+
+                    const duplicateCircle = document.getElementById(`scan${serverFinger}`);
+                    if (duplicateCircle && !duplicateCircle.classList.contains('success')) {
+                        duplicateCircle.classList.remove('scanning');
+                        duplicateCircle.classList.add('error');
+                        duplicateCircle.innerHTML = '<i class="bi bi-exclamation-lg"></i>';
+                    }
+                } else {
+                    updateState.duplicateActive = false;
+                    const statusDiv = document.getElementById('statusMessage');
+                    if (statusDiv && statusDiv.className.indexOf('alert-warning') !== -1) {
+                        statusDiv.className = 'alert alert-info mb-4';
+                    }
+                }
 
                 const snapshot = `${String(data.mode)}:${serverFinger}:${serverScanStep}:${String(data.last_sensor_id || '')}`;
                 if (snapshot !== updateState.lastProgressSnapshot) {
@@ -884,6 +937,11 @@ function beginEnrollmentMonitor() {
             }
 
             if (data.mode === 'failed') {
+                if (updateState.monitorHandle) {
+                    clearInterval(updateState.monitorHandle);
+                    updateState.monitorHandle = null;
+                }
+
                 const rawError = data.message || 'Enrollment failed on scanner. Please retry enrollment.';
                 const uiError = formatEnrollmentUiError(rawError);
 
@@ -965,14 +1023,23 @@ function updateProgress() {
 
     document.querySelectorAll('.scan-circle').forEach(circle => {
         if (!circle.classList.contains('success')) {
-            circle.classList.remove('scanning', 'error');
-            circle.innerHTML = '<i class="bi bi-fingerprint"></i>';
+            const isCurrentCircle = Number(circle.dataset.finger) === Number(updateState.currentFinger);
+            if (!(updateState.duplicateActive && isCurrentCircle)) {
+                circle.classList.remove('scanning', 'error');
+                circle.innerHTML = '<i class="bi bi-fingerprint"></i>';
+            }
         }
     });
 
     const currentCircle = document.getElementById(`scan${updateState.currentFinger}`);
     if (currentCircle && !currentCircle.classList.contains('success')) {
-        currentCircle.classList.add('scanning');
+        if (updateState.duplicateActive) {
+            currentCircle.classList.remove('scanning');
+            currentCircle.classList.add('error');
+            currentCircle.innerHTML = '<i class="bi bi-exclamation-lg"></i>';
+        } else {
+            currentCircle.classList.add('scanning');
+        }
     }
 
     const statusText = document.getElementById('statusText');
@@ -980,7 +1047,9 @@ function updateProgress() {
         statusText.textContent = `Scanning finger ${updateState.currentFinger} ${updateState.currentScanStep} of ${updateState.scanStepsPerFinger}`;
     }
 
-    setInlineScanStatus('waiting', `Waiting: scan finger ${updateState.currentFinger} (${updateState.currentScanStep} of ${updateState.scanStepsPerFinger})...`);
+    if (!updateState.duplicateActive) {
+        setInlineScanStatus('waiting', `Waiting: scan finger ${updateState.currentFinger} (${updateState.currentScanStep} of ${updateState.scanStepsPerFinger})...`);
+    }
 
     updateOverallProgress();
 }
@@ -1014,7 +1083,9 @@ function showWaitingMessage(message) {
         statusDiv.className = 'alert alert-info mb-4';
     }
 
-    setInlineScanStatus('waiting', message || 'Waiting for next scan...');
+    if (!updateState.duplicateActive) {
+        setInlineScanStatus('waiting', message || 'Waiting for next scan...');
+    }
 }
 
 function showError(message) {
@@ -1025,7 +1096,7 @@ function showError(message) {
             <div>
                 <i class="bi bi-exclamation-triangle me-2"></i>${message}
             </div>
-            <button type="button" class="btn btn-sm btn-outline-danger" onclick="handleRetryAction()">
+            <button type="button" class="btn btn-sm btn-outline-danger" onclick="handleRetryAction(this)">
                 <i class="bi bi-arrow-clockwise me-1"></i>Retry
             </button>
         </div>
@@ -1126,7 +1197,6 @@ async function retryEnrollment() {
         updateState.startRequestedAt = 0;
 
         renderScanCircles(updateState.numFingers);
-        setFingerButtonsDisabled(true);
         updateProgress();
         showWaitingMessage('Retry queued. Scanner will clear previous fingerprints and start scanning again.');
         beginEnrollmentMonitor();
@@ -1173,15 +1243,17 @@ function resetModal() {
     if (updateState.monitorHandle) {
         clearInterval(updateState.monitorHandle);
     }
+    if (updateState.statusAutoHideTimer) {
+        clearTimeout(updateState.statusAutoHideTimer);
+        updateState.statusAutoHideTimer = null;
+    }
 
-    document.getElementById('step1SelectFingers').style.display = 'block';
+    document.getElementById('step1SelectFingers').style.display = 'none';
     document.getElementById('step2EnrollmentProgress').style.display = 'none';
     document.getElementById('step3Complete').style.display = 'none';
-
-    document.querySelectorAll('.finger-btn').forEach(b => b.classList.remove('selected'));
     renderScanCircles(1);
 
-    updateState.numFingers = 0;
+    updateState.numFingers = 1;
     updateState.currentFinger = 1;
     updateState.enrolledFingerprints = [];
     updateState.registrationId = null;
@@ -1197,48 +1269,18 @@ function resetModal() {
     updateState.startRequestedAt = 0;
     updateState.currentScanStep = 1;
     updateState.lastProgressSnapshot = '';
-    setFingerButtonsDisabled(false);
-
+    updateState.duplicateNoticeUntil = 0;
+    updateState.duplicateActive = false;
     setInlineScanStatus('waiting', 'Waiting for next scan...');
 
     updateOverallProgress();
     updateScanStepIndicators();
 
-    const debugBox = document.getElementById('debugMessage');
-    const debugText = document.getElementById('debugText');
-    if (debugBox) {
-        debugBox.style.display = 'none';
-    }
-    if (debugText) {
-        debugText.textContent = '';
-    }
 }
 
 function appendDebug(message, data) {
-    const debugBox = document.getElementById('debugMessage');
-    const debugText = document.getElementById('debugText');
-    if (!debugBox || !debugText) {
-        return;
-    }
-
-    const ts = new Date().toLocaleTimeString();
-    let line = `[${ts}] ${message}`;
-
-    if (typeof data !== 'undefined') {
-        try {
-            line += `\n${JSON.stringify(data)}`;
-        } catch (e) {
-            line += `\n${String(data)}`;
-        }
-    }
-
-    updateState.debugLines.push(line);
-    if (updateState.debugLines.length > 4) {
-        updateState.debugLines = updateState.debugLines.slice(-4);
-    }
-
-    debugText.textContent = updateState.debugLines.join('\n\n');
-    debugBox.style.display = 'block';
+    // Debug panel intentionally removed from UI.
+    return;
 }
 
 function showValidationError(message) {
@@ -1347,6 +1389,13 @@ function showAlert(type, message) {
     border-color: #ef4444;
     color: #ef4444;
     background: #fef2f2;
+    box-shadow: 0 0 0 4px rgba(239, 68, 68, 0.15);
+    animation: duplicatePulse 0.7s infinite alternate;
+}
+
+@keyframes duplicatePulse {
+    0% { transform: scale(1); }
+    100% { transform: scale(1.08); }
 }
 
 .enrollment-header {

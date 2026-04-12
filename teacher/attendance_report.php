@@ -153,6 +153,78 @@ function formatAttendanceHistoryName(array $record): string
     return strtolower(trim($name));
 }
 
+function findSchoolYearByLabel(array $schoolYears, string $label): ?array
+{
+    foreach ($schoolYears as $schoolYear) {
+        if ((string)($schoolYear['label'] ?? '') === $label) {
+            return $schoolYear;
+        }
+    }
+
+    return null;
+}
+
+function buildSchoolYearSemesterRanges(array $schoolYear): array
+{
+    $startDate = trim((string)($schoolYear['start_date'] ?? ''));
+    $endDate = trim((string)($schoolYear['end_date'] ?? ''));
+
+    if ($startDate === '' || $endDate === '') {
+        return [];
+    }
+
+    try {
+        $semesterOneStart = new DateTime($startDate);
+        $semesterOneEnd = (clone $semesterOneStart)->modify('+5 months')->modify('last day of this month');
+        $semesterTwoStart = (clone $semesterOneEnd)->modify('+1 day');
+        $schoolYearEnd = new DateTime($endDate);
+
+        return [
+            1 => [
+                'start' => $semesterOneStart->format('Y-m-d'),
+                'end' => min($semesterOneEnd->format('Y-m-d'), $schoolYearEnd->format('Y-m-d')),
+                'label' => 'Semester 1',
+            ],
+            2 => [
+                'start' => $semesterTwoStart->format('Y-m-d'),
+                'end' => $schoolYearEnd->format('Y-m-d'),
+                'label' => 'Semester 2',
+            ],
+        ];
+    } catch (Throwable $e) {
+        return [];
+    }
+}
+
+function buildSchoolYearMonthOptions(array $schoolYear): array
+{
+    $startDate = trim((string)($schoolYear['start_date'] ?? ''));
+    $endDate = trim((string)($schoolYear['end_date'] ?? ''));
+
+    if ($startDate === '' || $endDate === '') {
+        return [];
+    }
+
+    try {
+        $current = new DateTime($startDate);
+        $lastDate = new DateTime($endDate);
+        $options = [];
+
+        while ($current <= $lastDate) {
+            $monthStart = (clone $current)->modify('first day of this month');
+            $options[] = [
+                'value' => $monthStart->format('Y-m-d'),
+                'label' => $monthStart->format('F Y'),
+            ];
+            $current->modify('+1 month');
+        }
+
+        return $options;
+    } catch (Throwable $e) {
+        return [];
+    }
+}
+
 if (($_SESSION['role'] ?? '') !== 'teacher') {
     header('Location: ../index.php?error=Unauthorized');
     exit;
@@ -200,6 +272,7 @@ SchoolYearHelper::ensureSchoolYearSupport($mysqli);
 $hasMiddleInitial = studentColumnExists($mysqli, 'middle_initial');
 $hasExtension = studentColumnExists($mysqli, 'extension');
 $activeSchoolYear = SchoolYearHelper::getEffectiveSchoolYearRange($mysqli);
+$schoolYears = SchoolYearHelper::getAllSchoolYears($mysqli);
 $syStartDate = $activeSchoolYear['start_date'] ?? date('Y-01-01');
 $syEndDate = $activeSchoolYear['end_date'] ?? date('Y-12-31');
 
@@ -228,11 +301,39 @@ if ($filter_end_date > $syEndDate) {
 }
 
 $filter_status = trim((string)($_GET['status'] ?? ''));
+$selectedExportPeriod = trim((string)($_GET['export_period'] ?? 'semester'));
+if (!in_array($selectedExportPeriod, ['daily', 'weekly', 'monthly', 'semester'], true)) {
+    $selectedExportPeriod = 'semester';
+}
+
+$selectedExportSchoolYearLabel = trim((string)($_GET['export_school_year'] ?? ($activeSchoolYear['label'] ?? '')));
+$selectedExportDate = normalizeDateValue($_GET['export_date'] ?? $defaultDate, $defaultDate);
+$selectedExportWeekStart = normalizeDateValue($_GET['export_week_start'] ?? $defaultDate, $defaultDate);
+$selectedExportMonthStart = normalizeDateValue($_GET['export_month_start'] ?? $defaultDate, $defaultDate);
+$selectedExportSemester = isset($_GET['semester']) ? (int)$_GET['semester'] : 1;
+if (!in_array($selectedExportSemester, [1, 2], true)) {
+    $selectedExportSemester = 1;
+}
 
 // Handle export
 if (isset($_GET['export']) && $_GET['export'] === 'csv') {
+    $exportPeriod = trim((string)($_GET['export_period'] ?? 'semester'));
+    $allowedExportPeriods = ['daily', 'weekly', 'monthly', 'semester'];
+    if (!in_array($exportPeriod, $allowedExportPeriods, true)) {
+        $exportPeriod = 'semester';
+    }
+
+    $exportSchoolYearLabel = trim((string)($_GET['export_school_year'] ?? ($activeSchoolYear['label'] ?? '')));
+    $exportSchoolYear = findSchoolYearByLabel($schoolYears, $exportSchoolYearLabel);
+    if (!$exportSchoolYear) {
+        $exportSchoolYear = $activeSchoolYear;
+        $exportSchoolYearLabel = (string)($activeSchoolYear['label'] ?? '');
+    }
+
+    $exportDate = normalizeDateValue($_GET['export_date'] ?? $defaultDate, $defaultDate);
+    $exportWeekStart = normalizeDateValue($_GET['export_week_start'] ?? $defaultDate, $defaultDate);
+    $exportMonthStart = normalizeDateValue($_GET['export_month_start'] ?? $defaultDate, $defaultDate);
     $exportSemester = isset($_GET['semester']) ? (int)$_GET['semester'] : 1;
-    $exportMonth = isset($_GET['month']) ? (int)$_GET['month'] : (int)date('n');
     $exportSortBy = trim((string)($_GET['export_sort_by'] ?? 'date'));
     $exportNameFormat = trim((string)($_GET['export_name_format'] ?? 'last_name_first'));
 
@@ -248,22 +349,40 @@ if (isset($_GET['export']) && $_GET['export'] === 'csv') {
         $exportNameFormat = 'last_name_first';
     }
 
-    if (!in_array($exportSemester, [1, 2], true)) {
-        $exportSemester = 1;
-    }
+    $exportStartDate = $defaultDate;
+    $exportEndDate = $defaultDate;
+    $exportLabel = 'Semester';
 
-    if ($exportMonth < 1 || $exportMonth > 12) {
-        $exportMonth = (int)date('n');
-    }
+    $semesterRanges = buildSchoolYearSemesterRanges($exportSchoolYear);
+    $monthOptions = buildSchoolYearMonthOptions($exportSchoolYear);
 
-    $semesterMonths = $exportSemester === 1 ? range(1, 6) : range(7, 12);
-    if (!in_array($exportMonth, $semesterMonths, true)) {
-        $exportMonth = $semesterMonths[0];
-    }
+    if ($exportPeriod === 'daily') {
+        $exportStartDate = $exportDate;
+        $exportEndDate = $exportDate;
+        $exportLabel = 'Daily';
+    } elseif ($exportPeriod === 'weekly') {
+        $weekStartTs = strtotime($exportWeekStart . ' monday this week');
+        if ($weekStartTs === false) {
+            $weekStartTs = strtotime($exportWeekStart);
+        }
+        $exportStartDate = date('Y-m-d', $weekStartTs ?: strtotime($exportWeekStart));
+        $exportEndDate = date('Y-m-d', strtotime($exportStartDate . ' +6 days'));
+        $exportLabel = 'Weekly';
+    } elseif ($exportPeriod === 'monthly') {
+        $exportStartDate = date('Y-m-01', strtotime($exportMonthStart));
+        $exportEndDate = date('Y-m-t', strtotime($exportStartDate));
+        $exportLabel = 'Monthly';
+    } elseif ($exportPeriod === 'semester') {
+        if (!in_array($exportSemester, [1, 2], true)) {
+            $exportSemester = 1;
+        }
 
-    $exportYear = (int)date('Y');
-    $exportStartDate = sprintf('%04d-%02d-01', $exportYear, $exportMonth);
-    $exportEndDate = date('Y-m-t', strtotime($exportStartDate));
+        if (!empty($semesterRanges[$exportSemester])) {
+            $exportStartDate = (string)$semesterRanges[$exportSemester]['start'];
+            $exportEndDate = (string)$semesterRanges[$exportSemester]['end'];
+            $exportLabel = (string)$semesterRanges[$exportSemester]['label'];
+        }
+    }
 
     if ($exportStartDate < $syStartDate) {
         $exportStartDate = $syStartDate;
@@ -271,6 +390,9 @@ if (isset($_GET['export']) && $_GET['export'] === 'csv') {
     if ($exportEndDate > $syEndDate) {
         $exportEndDate = $syEndDate;
     }
+
+    $exportMonthLabel = date('F Y', strtotime($exportStartDate));
+    $exportRangeLabel = $exportStartDate . ' to ' . $exportEndDate;
 
     while (ob_get_level() > 0) {
         ob_end_clean();
@@ -375,14 +497,15 @@ if (isset($_GET['export']) && $_GET['export'] === 'csv') {
     $scopeFileToken = $scopeFileToken !== '' ? $scopeFileToken : 'teacher_scope';
 
     header('Content-Type: text/csv; charset=UTF-8');
-    header('Content-Disposition: attachment; filename="' . rawurlencode($scopeFileToken) . '_attendance_sem' . $exportSemester . '_m' . $exportMonth . '.csv"');
+    header('Content-Disposition: attachment; filename="' . rawurlencode($scopeFileToken) . '_attendance_' . $exportPeriod . '_' . $exportStartDate . '_to_' . $exportEndDate . '.csv"');
 
     echo "\xEF\xBB\xBF";
     $output = fopen('php://output', 'w');
     fputcsv($output, ['Attendance Export']);
-    fputcsv($output, ['Semester', 'Semester ' . $exportSemester]);
-    fputcsv($output, ['Month', date('F', mktime(0, 0, 0, $exportMonth, 1))]);
-    fputcsv($output, ['Date Range', $exportStartDate . ' to ' . $exportEndDate]);
+    fputcsv($output, ['Period', ucfirst($exportPeriod)]);
+    fputcsv($output, ['School Year', $exportSchoolYearLabel !== '' ? $exportSchoolYearLabel : '-']);
+    fputcsv($output, ['Coverage', $exportLabel]);
+    fputcsv($output, ['Date Range', $exportRangeLabel]);
     fputcsv($output, ['Scope', $scopeLabel]);
     fputcsv($output, ['Sorted By', ucfirst($exportSortBy)]);
     fputcsv($output, []);
@@ -686,28 +809,61 @@ require '../includes/header.php';
                         <div class="col-12">
                             <h6 class="mb-3"><i class="bi bi-calendar-range"></i> Coverage</h6>
 
-                            <div class="row g-2">
-                                <div class="col-6">
-                                    <label for="semester" class="form-label">Semester</label>
-                                    <select class="form-select" id="semester" name="semester">
-                                        <option value="1">Semester 1 (Jan-Jun)</option>
-                                        <option value="2" <?php echo ((int)date('n') >= 7) ? 'selected' : ''; ?>>Semester 2 (Jul-Dec)</option>
-                                    </select>
-                                </div>
-                                <div class="col-6">
-                                    <label for="month" class="form-label">Month</label>
-                                    <select class="form-select" id="month" name="month">
-                                        <?php for ($m = 1; $m <= 12; $m++): ?>
-                                            <option value="<?php echo $m; ?>" <?php echo ((int)date('n') === $m) ? 'selected' : ''; ?>>
-                                                <?php echo htmlspecialchars(date('F', mktime(0, 0, 0, $m, 1))); ?>
-                                            </option>
-                                        <?php endfor; ?>
-                                    </select>
-                                </div>
+                            <div class="mb-3">
+                                <label for="export_period" class="form-label">Export Period</label>
+                                <select class="form-select" id="export_period" name="export_period">
+                                    <option value="daily" <?php echo $selectedExportPeriod === 'daily' ? 'selected' : ''; ?>>Daily</option>
+                                    <option value="weekly" <?php echo $selectedExportPeriod === 'weekly' ? 'selected' : ''; ?>>Weekly</option>
+                                    <option value="monthly" <?php echo $selectedExportPeriod === 'monthly' ? 'selected' : ''; ?>>Monthly</option>
+                                    <option value="semester" <?php echo $selectedExportPeriod === 'semester' ? 'selected' : ''; ?>>Per Semester</option>
+                                </select>
+                            </div>
+
+                            <div class="mb-3" id="exportSchoolYearGroup">
+                                <label for="export_school_year" class="form-label">School Year</label>
+                                <select class="form-select" id="export_school_year" name="export_school_year">
+                                    <?php foreach ($schoolYears as $schoolYear): ?>
+                                        <?php $schoolYearLabel = (string)($schoolYear['label'] ?? ''); ?>
+                                        <option value="<?php echo htmlspecialchars($schoolYearLabel); ?>" <?php echo $selectedExportSchoolYearLabel === $schoolYearLabel ? 'selected' : ''; ?>>
+                                            <?php echo htmlspecialchars($schoolYearLabel); ?>
+                                        </option>
+                                    <?php endforeach; ?>
+                                </select>
+                            </div>
+
+                            <div class="mb-3" id="exportDailyGroup" style="display:none;">
+                                <label for="export_date" class="form-label">Date</label>
+                                <input type="date" class="form-control" id="export_date" name="export_date" value="<?php echo htmlspecialchars($selectedExportDate); ?>">
+                            </div>
+
+                            <div class="mb-3" id="exportWeeklyGroup" style="display:none;">
+                                <label for="export_week_start" class="form-label">Week Start</label>
+                                <input type="date" class="form-control" id="export_week_start" name="export_week_start" value="<?php echo htmlspecialchars($selectedExportWeekStart); ?>">
+                                <small class="text-muted">Export will include the 7-day span starting from this date.</small>
+                            </div>
+
+                            <div class="mb-3" id="exportMonthlyGroup" style="display:none;">
+                                <label for="export_month_start" class="form-label">Month</label>
+                                <select class="form-select" id="export_month_start" name="export_month_start">
+                                    <?php foreach (buildSchoolYearMonthOptions($activeSchoolYear) as $monthOption): ?>
+                                        <option value="<?php echo htmlspecialchars($monthOption['value']); ?>" <?php echo $selectedExportMonthStart === $monthOption['value'] ? 'selected' : ''; ?>>
+                                            <?php echo htmlspecialchars($monthOption['label']); ?>
+                                        </option>
+                                    <?php endforeach; ?>
+                                </select>
+                            </div>
+
+                            <div class="mb-3" id="exportSemesterGroup" style="display:none;">
+                                <label for="semester" class="form-label">Semester</label>
+                                <select class="form-select" id="semester" name="semester">
+                                    <option value="1" <?php echo $selectedExportSemester === 1 ? 'selected' : ''; ?>>Semester 1</option>
+                                    <option value="2" <?php echo $selectedExportSemester === 2 ? 'selected' : ''; ?>>Semester 2</option>
+                                </select>
+                                <small class="text-muted d-block mt-2">Semester dates are derived from the selected school year in the database.</small>
                             </div>
 
                             <small class="text-muted d-block mt-2">
-                                Export covers the selected month and validates it against the selected semester.
+                                Export period is validated against the selected school year from the database.
                             </small>
                         </div>
 
@@ -747,48 +903,39 @@ require '../includes/header.php';
 
 <script>
 document.addEventListener('DOMContentLoaded', function () {
-    const semesterSelect = document.getElementById('semester');
-    const monthSelect = document.getElementById('month');
-    if (!semesterSelect || !monthSelect) {
+    const periodSelect = document.getElementById('export_period');
+    const schoolYearGroup = document.getElementById('exportSchoolYearGroup');
+    const dailyGroup = document.getElementById('exportDailyGroup');
+    const weeklyGroup = document.getElementById('exportWeeklyGroup');
+    const monthlyGroup = document.getElementById('exportMonthlyGroup');
+    const semesterGroup = document.getElementById('exportSemesterGroup');
+
+    if (!periodSelect) {
         return;
     }
 
-    const monthNames = {
-        1: 'January',
-        2: 'February',
-        3: 'March',
-        4: 'April',
-        5: 'May',
-        6: 'June',
-        7: 'July',
-        8: 'August',
-        9: 'September',
-        10: 'October',
-        11: 'November',
-        12: 'December'
-    };
+    const updatePeriodControls = () => {
+        const period = periodSelect.value;
 
-    const renderMonthOptions = () => {
-        const selectedMonth = Number(monthSelect.value || 0);
-        const isSemOne = semesterSelect.value === '1';
-        const start = isSemOne ? 1 : 7;
-        const end = isSemOne ? 6 : 12;
-
-        monthSelect.innerHTML = '';
-        for (let m = start; m <= end; m++) {
-            const option = new Option(monthNames[m], String(m));
-            monthSelect.add(option);
+        if (schoolYearGroup) {
+            schoolYearGroup.style.display = '';
         }
-
-        if (selectedMonth >= start && selectedMonth <= end) {
-            monthSelect.value = String(selectedMonth);
-        } else {
-            monthSelect.value = String(start);
+        if (dailyGroup) {
+            dailyGroup.style.display = period === 'daily' ? '' : 'none';
+        }
+        if (weeklyGroup) {
+            weeklyGroup.style.display = period === 'weekly' ? '' : 'none';
+        }
+        if (monthlyGroup) {
+            monthlyGroup.style.display = period === 'monthly' ? '' : 'none';
+        }
+        if (semesterGroup) {
+            semesterGroup.style.display = period === 'semester' ? '' : 'none';
         }
     };
 
-    semesterSelect.addEventListener('change', renderMonthOptions);
-    renderMonthOptions();
+    periodSelect.addEventListener('change', updatePeriodControls);
+    updatePeriodControls();
 });
 </script>
 

@@ -10,8 +10,33 @@ require_method('POST');
 try {
     $input = read_json_body();
 
-    $studentId = isset($input['student_id']) ? require_positive_int($input, 'student_id') : 0;
-    $sensorId = require_positive_int($input, 'sensor_id');
+    $studentId = 0;
+    if (isset($input['student_id'])) {
+        $rawStudentId = filter_var($input['student_id'], FILTER_VALIDATE_INT);
+        if ($rawStudentId === false || $rawStudentId < 0) {
+            api_response(400, [
+                'success' => false,
+                'message' => 'Invalid integer value for: student_id'
+            ]);
+        }
+        $studentId = (int)$rawStudentId;
+    }
+
+    if (!isset($input['sensor_id'])) {
+        api_response(400, [
+            'success' => false,
+            'message' => 'Missing required field: sensor_id'
+        ]);
+    }
+
+    $rawSensorId = filter_var($input['sensor_id'], FILTER_VALIDATE_INT);
+    if ($rawSensorId === false || $rawSensorId < 0) {
+        api_response(400, [
+            'success' => false,
+            'message' => 'Invalid integer value for: sensor_id'
+        ]);
+    }
+    $sensorId = (int)$rawSensorId;
     $ok = isset($input['success']) ? (bool)$input['success'] : true;
     $errorMessage = trim((string)($input['error_message'] ?? ''));
 

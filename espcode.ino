@@ -8,14 +8,18 @@
 #include <Wire.h>
 #include <LiquidCrystal_I2C.h>
 
-#define WIFI_SSID "Redmi Note 13"
-#define WIFI_PASSWORD "aaaaaaaa"
-// Update this to your PHP server IP.
-const char* SERVER_HOST = "10.86.231.94";
+#define WIFI_SSID "Fingerprintscans"
+#define WIFI_PASSWORD "fingerpassword"
+
+#define DISCOVERY_RETRY_INTERVAL 10000
+
+#define DISCOVERY_SCAN_CONNECT_TIMEOUT_MS 80
+#define DISCOVERY_SCAN_HTTP_WINDOW_MS 220
+#define DISCOVERY_SCAN_HOSTS_PER_ATTEMPT 16
 
 
 #define WIFI_TIMEOUT 20000
-#define WIFI_RECONNECT_INTERVAL 30000
+#define WIFI_RECONNECT_INTERVAL 10000
 #define SENSOR_RETRY_INTERVAL 5000
 #define SERVER_CHECK_INTERVAL 10000
 #define COMMAND_POLL_INTERVAL 1500
@@ -25,6 +29,8 @@ const char* SERVER_HOST = "10.86.231.94";
 #define ATTEND_IDLE_COOLDOWN_MS 2500
 #define ENROLL_CAPTURE_TIMEOUT_MS 25000
 #define ENROLL_REMOVE_TIMEOUT_MS 12000
+#define ENROLL_MODEL_RETRY_LIMIT 2
+#define ENROLL_DUPLICATE_CONFIDENCE_MIN 110
 
 #define SENSOR_RX_PIN D1
 #define SENSOR_TX_PIN D2
@@ -63,8 +69,10 @@ unsigned long lastSensorInitAttemptMs = 0;
 unsigned long lastScanErrorLogMs = 0;
 unsigned long lastServerCheckMs = 0;
 unsigned long lastSystemSummaryMs = 0;
+unsigned long lastDiscoveryAttemptMs = 0;
 unsigned long lastEnrollCompleteMs = 0;
 unsigned long lastAttendanceCompleteMs = 0;
+uint8_t subnetScanNextHost = 1;
 String lcdLine1 = "";
 String lcdLine2 = "";
 bool wifiWasConnected = false;
@@ -73,15 +81,142 @@ bool serverReady = false;
 bool bootReady = false;
 String currentMode = "IDLE";
 String lastEnrollFailureReason = "";
+String serverHost = "";
 
-enum FeedbackMode {
-  FEEDBACK_IDLE,
-  FEEDBACK_WAITING,
-  FEEDBACK_SUCCESS,
-  FEEDBACK_ERROR
-};
+bool probeServerCandidate(const IPAddress& candidateIp) {
+  WiFiClient probeClient;
+  probeClient.setTimeout(DISCOVERY_SCAN_CONNECT_TIMEOUT_MS);
 
-FeedbackMode feedbackMode = FEEDBACK_IDLE;
+  if (!probeClient.connect(candidateIp, SERVER_PORT)) {
+    return false;
+  }
+
+  String host = candidateIp.toString();
+  String healthPath = String(API_BASE_PATH) + "/health.php?device_key=" + String(DEVICE_KEY);
+  probeClient.print("GET ");
+  probeClient.print(healthPath);
+  probeClient.println(" HTTP/1.1");
+  probeClient.print("Host: ");
+  probeClient.println(host);
+  probeClient.println("Connection: close");
+  probeClient.println();
+
+  unsigned long start = millis();
+  String response = "";
+  while (millis() - start < DISCOVERY_SCAN_HTTP_WINDOW_MS) {
+    while (probeClient.available()) {
+      char c = (char)probeClient.read();
+      if (response.length() < 256) {
+        response += c;
+      }
+      if (response.indexOf("\"success\":true") >= 0) {
+        probeClient.stop();
+        return true;
+      }
+      start = millis();
+    }
+
+    if (!probeClient.connected()) {
+      break;
+    }
+    delay(5);
+    yield();
+  }
+
+  probeClient.stop();
+  return response.indexOf("\"success\":true") >= 0;
+}
+
+bool discoverServerBySubnetScan() {
+  if (WiFi.status() != WL_CONNECTED) {
+    return false;
+  }
+
+  IPAddress localIp = WiFi.localIP();
+  IPAddress subnetMask = WiFi.subnetMask();
+  if (!(subnetMask[0] == 255 && subnetMask[1] == 255 && subnetMask[2] == 255)) {
+    logInfo("DISCOVERY", "Subnet scan skipped (non-/24 network)");
+    return false;
+  }
+
+  displayLCD("Finding server", "Subnet scan");
+  logInfo("DISCOVERY", "Trying subnet scan fallback...");
+
+  bool tried[255] = {false};
+
+  // Prioritize common CAMS host ranges first to reduce first-match latency.
+  int localHost = (int)localIp[3];
+  int nearMinus1 = localHost > 1 ? localHost - 1 : localHost;
+  int nearPlus1 = localHost < 254 ? localHost + 1 : localHost;
+  uint8_t preferredHosts[] = {
+    94, 95, 93, 100, 101, 102, 90, 110, 120,
+    (uint8_t)localHost, (uint8_t)nearMinus1, (uint8_t)nearPlus1,
+    1, 2, 10, 20, 50, 150, 200, 254
+  };
+
+  for (size_t i = 0; i < (sizeof(preferredHosts) / sizeof(preferredHosts[0])); i++) {
+    uint8_t host = preferredHosts[i];
+    if (host < 1 || host > 254 || tried[host]) {
+      continue;
+    }
+
+    tried[host] = true;
+    IPAddress candidate(localIp[0], localIp[1], localIp[2], host);
+    if (probeServerCandidate(candidate)) {
+      serverHost = candidate.toString();
+      subnetScanNextHost = 1;
+      logInfo("DISCOVERY", "Server found by scan at " + serverHost);
+      displayLCD("Server found", serverHost);
+      return true;
+    }
+    yield();
+  }
+
+  for (uint8_t scanned = 0; scanned < DISCOVERY_SCAN_HOSTS_PER_ATTEMPT; scanned++) {
+    if (subnetScanNextHost > 254) {
+      subnetScanNextHost = 1;
+    }
+
+    uint8_t host = subnetScanNextHost++;
+    if (tried[host]) {
+      continue;
+    }
+
+    IPAddress candidate(localIp[0], localIp[1], localIp[2], host);
+    if (probeServerCandidate(candidate)) {
+      serverHost = candidate.toString();
+      subnetScanNextHost = 1;
+      logInfo("DISCOVERY", "Server found by scan at " + serverHost);
+      displayLCD("Server found", serverHost);
+      return true;
+    }
+    yield();
+  }
+
+  logInfo("DISCOVERY", "Subnet scan chunk finished, no match yet");
+  return false;
+}
+
+bool discoverServerHost() {
+  if (WiFi.status() != WL_CONNECTED) {
+    return false;
+  }
+
+  unsigned long now = millis();
+  if (now - lastDiscoveryAttemptMs < DISCOVERY_RETRY_INTERVAL) {
+    return serverHost.length() > 0;
+  }
+  lastDiscoveryAttemptMs = now;
+
+  return discoverServerBySubnetScan();
+}
+
+const uint8_t FEEDBACK_IDLE = 0;
+const uint8_t FEEDBACK_WAITING = 1;
+const uint8_t FEEDBACK_SUCCESS = 2;
+const uint8_t FEEDBACK_ERROR = 3;
+
+uint8_t feedbackMode = FEEDBACK_IDLE;
 bool feedbackWaitingGreenPhase = true;
 unsigned long feedbackLastToggleMs = 0;
 unsigned long feedbackPulseUntilMs = 0;
@@ -101,7 +236,7 @@ void playFeedbackTone(uint16_t frequency, uint16_t durationMs) {
   feedbackPulseUntilMs = millis() + durationMs;
 }
 
-void setFeedbackMode(FeedbackMode mode) {
+void setFeedbackMode(uint8_t mode) {
   feedbackMode = mode;
 
   if (mode == FEEDBACK_WAITING) {
@@ -211,6 +346,11 @@ bool checkServerReady() {
     return false;
   }
 
+  if (serverHost.length() == 0 && !discoverServerHost()) {
+    serverReady = false;
+    return false;
+  }
+
   unsigned long now = millis();
   if (now - lastServerCheckMs < SERVER_CHECK_INTERVAL) {
     return serverReady;
@@ -221,7 +361,7 @@ bool checkServerReady() {
 
   String body;
   int statusCode = 0;
-  if (!httpGet(String(API_BASE_PATH) + "/health.php", body, &statusCode)) {
+  if (!httpGet(String(API_BASE_PATH) + "/health.php?device_key=" + String(DEVICE_KEY), body, &statusCode)) {
     serverReady = false;
     logInfo("SERVER", "API unreachable (HTTP code=" + String(statusCode) + ")");
     return false;
@@ -297,6 +437,9 @@ typedef struct DeviceCommand {
 } DeviceCommand;
 
 DeviceCommand getCommand();
+bool reportScanProgress(int studentId, int fingerIndex, int scanStep, int totalSteps);
+bool reportScanProgressWithStatus(int studentId, int fingerIndex, int scanStep, int totalSteps, const char* uiStatus, const String& uiMessage);
+bool isDuplicateAssignedToOtherStudent(int sensorId, int studentId);
 
 void displayLCD(const String& message) {
   String line1 = message;
@@ -356,6 +499,7 @@ bool connectWiFi() {
   if (wifiWasConnected) {
     wifiWasConnected = false;
     serverReady = false;
+    serverHost = "";
     logInfo("WIFI", "Disconnected");
   }
 
@@ -405,9 +549,17 @@ bool httpGet(const String& path, String& outBody, int* outStatusCode) {
     return false;
   }
 
+  if (serverHost.length() == 0 && !discoverServerHost()) {
+    logInfo("HTTP", "GET skipped, server host not discovered");
+    if (outStatusCode) {
+      *outStatusCode = 0;
+    }
+    return false;
+  }
+
   WiFiClient client;
   HTTPClient http;
-  String url = "http://" + String(SERVER_HOST) + ":" + String(SERVER_PORT) + path;
+  String url = "http://" + serverHost + ":" + String(SERVER_PORT) + path;
   Serial.print("[HTTP] GET ");
   Serial.println(url);
 
@@ -450,9 +602,14 @@ bool httpPostJson(const String& path, const String& payload, String& outBody) {
     return false;
   }
 
+  if (serverHost.length() == 0 && !discoverServerHost()) {
+    logInfo("HTTP", "POST skipped, server host not discovered");
+    return false;
+  }
+
   WiFiClient client;
   HTTPClient http;
-  String url = "http://" + String(SERVER_HOST) + ":" + String(SERVER_PORT) + path;
+  String url = "http://" + serverHost + ":" + String(SERVER_PORT) + path;
   Serial.print("[HTTP] POST ");
   Serial.println(url);
 
@@ -605,6 +762,29 @@ void showEnrollStep(int fingerIndex, int stepNo, const String& message) {
   displayLCD(line1, line2);
 }
 
+bool isDuplicateAssignedToOtherStudent(int sensorId, int studentId) {
+  if (sensorId <= 0 || studentId <= 0) {
+    return true;
+  }
+
+  String path = String(API_BASE_PATH) + "/fingerprint-owner.php?sensor_id=" + String(sensorId) + "&student_id=" + String(studentId);
+  String body;
+  int statusCode = 0;
+  if (!httpGet(path, body, &statusCode)) {
+    Serial.println("[ENROLL] Ownership check failed, treating as duplicate for safety");
+    return true;
+  }
+
+  StaticJsonDocument<256> doc;
+  DeserializationError err = deserializeJson(doc, body);
+  if (err || !(doc["success"] | false)) {
+    Serial.println("[ENROLL] Ownership check parse failed, treating as duplicate for safety");
+    return true;
+  }
+
+  return doc["owned_by_other"] | false;
+}
+
 bool enrollFinger(int sensorId, int fingerIndex, int studentId) {
   Serial.print("[ENROLL] Start ID=");
   Serial.println(sensorId);
@@ -612,10 +792,16 @@ bool enrollFinger(int sensorId, int fingerIndex, int studentId) {
 
   uint8_t p;
   unsigned long start;
+  int modelRetryCount = 0;
+  int lastReportedScanStep = 0;
+  String lastReportedUiStatus = "";
+  String lastReportedUiMessage = "";
+  bool retryEnrollmentAttempt = false;
 
-  while (true) {
+  do {
+    retryEnrollmentAttempt = false;
     // Report scan step 1 to server before starting
-    reportScanProgress(studentId, fingerIndex, 1, ENROLL_SCAN_STEPS);
+    reportEnrollmentProgressIfChanged(studentId, fingerIndex, 1, ENROLL_SCAN_STEPS, "waiting", "", lastReportedScanStep, lastReportedUiStatus, lastReportedUiMessage);
 
     // Step 1: getImage() + image2Tz(1)
     showEnrollStep(fingerIndex, 1, "");
@@ -661,21 +847,55 @@ bool enrollFinger(int sensorId, int fingerIndex, int studentId) {
       return false;
     }
 
-    // For finger 2+, reject a finger that is already enrolled in sensor memory.
-    // Instead of failing the enrollment, keep waiting so the user can try another finger.
-    if (fingerIndex > 1) {
-      p = finger.fingerFastSearch();
-      if (p == FINGERPRINT_OK) {
-        Serial.print("[ENROLL] Duplicate finger detected at sensor_id=");
-        Serial.println(finger.fingerID);
-        displayLCD("Use other finger", "Try again");
+    // Reject a finger that is already enrolled in sensor memory.
+    // Keep waiting so the user can try another finger instead of failing the whole session.
+    p = finger.fingerFastSearch();
+    if (p == FINGERPRINT_OK) {
+      int duplicateSensorId = finger.fingerID;
+      int duplicateConfidence = finger.confidence;
+
+      // Ignore weak matches to reduce false duplicate detection between different fingers.
+      if (duplicateConfidence < ENROLL_DUPLICATE_CONFIDENCE_MIN) {
+        Serial.print("[ENROLL] Weak duplicate match ignored sensor_id=");
+        Serial.print(duplicateSensorId);
+        Serial.print(" confidence=");
+        Serial.println(duplicateConfidence);
+      } else {
+        bool duplicateConfirmed = false;
+
+        // Require a second scan confirmation before rejecting as duplicate.
+        displayLCD("Confirm finger", "Scan again");
         waitFingerRemoved(ENROLL_REMOVE_TIMEOUT_MS);
-        continue;
+        if (captureToBuffer(1, ENROLL_CAPTURE_TIMEOUT_MS)) {
+          uint8_t confirmSearch = finger.fingerFastSearch();
+          if (confirmSearch == FINGERPRINT_OK && finger.fingerID == duplicateSensorId && finger.confidence >= ENROLL_DUPLICATE_CONFIDENCE_MIN) {
+            duplicateConfirmed = true;
+          }
+        }
+
+        if (duplicateConfirmed) {
+          if (isDuplicateAssignedToOtherStudent(duplicateSensorId, studentId)) {
+            Serial.print("[ENROLL] Duplicate finger confirmed at sensor_id=");
+            Serial.print(duplicateSensorId);
+            Serial.print(" confidence=");
+            Serial.println(duplicateConfidence);
+            reportEnrollmentProgressIfChanged(studentId, fingerIndex, 1, ENROLL_SCAN_STEPS, "duplicate", "Duplicate finger already enrolled. Use another finger.", lastReportedScanStep, lastReportedUiStatus, lastReportedUiMessage);
+            displayLCD("Use other finger", "Try again");
+            waitFingerRemoved(ENROLL_REMOVE_TIMEOUT_MS);
+            retryEnrollmentAttempt = true;
+            break;
+          }
+
+          Serial.print("[ENROLL] Duplicate sensor match is not linked to other student, continuing. sensor_id=");
+          Serial.println(duplicateSensorId);
+        }
+
+        Serial.print("[ENROLL] Duplicate not confirmed, continuing enrollment. sensor_id=");
+        Serial.println(duplicateSensorId);
       }
     }
 
-    break;
-  }
+  } while (retryEnrollmentAttempt);
 
   // Wait for finger removal.
   showEnrollStep(fingerIndex, 1, "Remove");
@@ -762,6 +982,17 @@ bool enrollFinger(int sensorId, int fingerIndex, int studentId) {
   if (p != FINGERPRINT_OK) {
     Serial.print("[ENROLL] createModel failed: ");
     Serial.println(p);
+    if ((int)p == 10 && modelRetryCount < ENROLL_MODEL_RETRY_LIMIT) {
+      modelRetryCount++;
+      Serial.print("[ENROLL] createModel mismatch, retrying enrollment attempt #");
+      Serial.println(modelRetryCount);
+      lastEnrollFailureReason = "createModel mismatch";
+      reportEnrollmentProgressIfChanged(studentId, fingerIndex, 2, ENROLL_SCAN_STEPS, "retry", "Fingerprint mismatch. Scan the same finger again.", lastReportedScanStep, lastReportedUiStatus, lastReportedUiMessage);
+      displayLCD("Hold steady", "Scan again");
+      waitFingerRemoved(ENROLL_REMOVE_TIMEOUT_MS);
+      return false;
+    }
+
     lastEnrollFailureReason = "createModel code=" + String((int)p);
     displayLCD("Not Found", "Try Again");
     return false;
@@ -881,11 +1112,19 @@ bool advanceToNextFinger(int studentId, int fingerIndex) {
 }
 
 bool reportScanProgress(int studentId, int fingerIndex, int scanStep, int totalSteps) {
+  return reportScanProgressWithStatus(studentId, fingerIndex, scanStep, totalSteps, "waiting", "");
+}
+
+bool reportScanProgressWithStatus(int studentId, int fingerIndex, int scanStep, int totalSteps, const char* uiStatus, const String& uiMessage) {
   StaticJsonDocument<128> doc;
   doc["student_id"] = studentId;
   doc["finger_index"] = fingerIndex;
   doc["scan_step"] = scanStep;
   doc["total_steps"] = totalSteps;
+  doc["ui_status"] = uiStatus;
+  if (uiMessage.length() > 0) {
+    doc["ui_message"] = uiMessage;
+  }
 
   String payload;
   serializeJson(doc, payload);
@@ -902,6 +1141,32 @@ bool reportScanProgress(int studentId, int fingerIndex, int scanStep, int totalS
 
   }
 
+  return true;
+}
+
+bool reportEnrollmentProgressIfChanged(
+  int studentId,
+  int fingerIndex,
+  int scanStep,
+  int totalSteps,
+  const char* uiStatus,
+  const String& uiMessage,
+  int& lastReportedScanStep,
+  String& lastReportedUiStatus,
+  String& lastReportedUiMessage
+) {
+  String normalizedStatus = uiStatus ? String(uiStatus) : String("waiting");
+  if (lastReportedScanStep == scanStep && lastReportedUiStatus == normalizedStatus && lastReportedUiMessage == uiMessage) {
+    return true;
+  }
+
+  if (!reportScanProgressWithStatus(studentId, fingerIndex, scanStep, totalSteps, uiStatus, uiMessage)) {
+    return false;
+  }
+
+  lastReportedScanStep = scanStep;
+  lastReportedUiStatus = normalizedStatus;
+  lastReportedUiMessage = uiMessage;
   return true;
 }
 
@@ -937,9 +1202,23 @@ bool sendDeleteResult(int studentId, int sensorId, bool success, const String& e
 }
 
 bool deleteFingerprintModel(int sensorId, String& outError) {
-  if (sensorId <= 0 || sensorId > 127) {
+  if (sensorId < 0 || sensorId > 127) {
     outError = "Invalid sensor_id";
     return false;
+  }
+
+  if (sensorId == 0) {
+    for (int slot = 1; slot <= 127; slot++) {
+      uint8_t clearStatus = finger.deleteModel(slot);
+      if (!(clearStatus == FINGERPRINT_OK || clearStatus == FINGERPRINT_BADLOCATION || clearStatus == FINGERPRINT_FLASHERR)) {
+        outError = "clearAll code=" + String((int)clearStatus);
+        return false;
+      }
+      delay(5);
+      yield();
+    }
+
+    return true;
   }
 
   uint8_t p = finger.deleteModel(sensorId);
@@ -980,8 +1259,15 @@ bool sendAttendance(int sensorId) {
     const char* msg = resp["message"] | "Attendance err";
     Serial.print("[ATTEND] API error: ");
     Serial.println(msg);
+    String msgText = String(msg);
+    msgText.toLowerCase();
+
     if (String(msg) == "Not enrolled") {
       displayLCD("Not enrolled", "Try Again");
+    } else if (msgText.indexOf("no schedule") >= 0) {
+      displayLCD("No class today", "Attendance off");
+    } else if (msgText.indexOf("not allowed") >= 0 || msgText.indexOf("outside") >= 0) {
+      displayLCD("Outside schedule", "Try on class");
     } else {
       displayLCD("Not Found", "Try Again");
     }
@@ -1042,8 +1328,8 @@ void setup() {
   Serial.print("[CONFIG] Device ID=");
   Serial.println(DEVICE_ID);
   Serial.print("[CONFIG] Server=");
-  Serial.print(SERVER_HOST);
-  Serial.print(":");
+  Serial.println("AUTO (local subnet scan)");
+  Serial.print("[CONFIG] Server Port=");
   Serial.println(SERVER_PORT);
   Serial.print("[CONFIG] API Path=");
   Serial.println(API_BASE_PATH);
@@ -1090,6 +1376,9 @@ void loop() {
     }
 
     displayLCD("Booting...", "Step3: Server");
+    if (serverHost.length() == 0) {
+      discoverServerHost();
+    }
     if (!checkServerReady()) {
       displayLCD("Server offline", "Retrying...");
       logSystemSummary();
@@ -1180,23 +1469,26 @@ void loop() {
 
   if (cmd.valid && currentMode == "DELETE") {
     if (cmd.sensorId <= 0) {
-      logInfo("DELETE", "Missing sensor_id in delete command");
-      sendDeleteResult(cmd.studentId, 0, false, "Missing sensor_id");
-      return;
+      logInfo("DELETE", "Clearing all sensor templates");
+      displayLCD("Resetting", "All fingerprints");
+    } else {
+      Serial.print("[DELETE] Deleting sensor_id=");
+      Serial.println(cmd.sensorId);
+      displayLCD("Deleting", "ID:" + String(cmd.sensorId));
     }
-
-    Serial.print("[DELETE] Deleting sensor_id=");
-    Serial.println(cmd.sensorId);
-    displayLCD("Deleting", "ID:" + String(cmd.sensorId));
 
     String deleteError = "";
     bool deleted = deleteFingerprintModel(cmd.sensorId, deleteError);
     bool posted = sendDeleteResult(cmd.studentId, cmd.sensorId, deleted, deleteError);
 
     if (deleted && posted) {
-      displayLCD("Delete done", "ID:" + String(cmd.sensorId));
+      if (cmd.sensorId <= 0) {
+        displayLCD("Reset done", "All cleared");
+      } else {
+        displayLCD("Delete done", "ID:" + String(cmd.sensorId));
+      }
     } else {
-      displayLCD("Delete failed", "ID:" + String(cmd.sensorId));
+      displayLCD("Delete failed", cmd.sensorId <= 0 ? "All fingerprints" : ("ID:" + String(cmd.sensorId)));
     }
 
     return;
@@ -1264,10 +1556,12 @@ void loop() {
     if (p == FINGERPRINT_NOTFOUND) {
       Serial.println("[IDLE] No match (finger not enrolled)");
       displayLCD("Not enrolled", "Try Again");
+      waitFingerRemoved(2000);
     } else {
       Serial.print("[IDLE] Search failed, code=");
       Serial.println(p);
       displayLCD("Read error", "Try Again");
+      waitFingerRemoved(1500);
     }
     return;
   }
@@ -1278,5 +1572,8 @@ void loop() {
   if (sendAttendance(matchedId)) {
     lastAttendanceCompleteMs = millis();
     waitFingerRemoved(4000);
+  } else {
+    // Avoid rapid reprocessing loops while finger remains on scanner.
+    waitFingerRemoved(2500);
   }
 }

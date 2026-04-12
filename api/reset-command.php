@@ -43,14 +43,14 @@ try {
     }
     $cancelStmt->execute();
 
-    $insertStmt = $mysqli->prepare("INSERT INTO device_commands (device_id, mode, status) VALUES (?, 'IDLE', 'PENDING')");
+    $insertStmt = $mysqli->prepare("INSERT INTO device_commands (device_id, mode, sensor_id, status, error_message) VALUES (?, 'DELETE', 0, 'PENDING', 'Reset all sensor fingerprints')");
     $insertStmt->bind_param('i', $deviceId);
     $insertStmt->execute();
 
     api_response(200, [
         'success' => true,
-        'message' => 'Device reset command queued',
-        'mode' => 'IDLE',
+        'message' => 'Sensor reset command queued',
+        'mode' => 'DELETE',
         'device_id' => $deviceId
     ]);
 } catch (Throwable $e) {

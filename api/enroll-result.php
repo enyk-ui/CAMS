@@ -90,13 +90,27 @@ try {
     $existingFingerprint = $existingFingerprintStmt->get_result()->fetch_assoc();
     $existingFingerprintStmt->close();
 
-    if ($existingFingerprint && (int)$existingFingerprint['sensor_id'] !== $sensorId) {
+    $sensorOwnerStmt = $mysqli->prepare("SELECT {$fingerprintLinkColumn} AS owner_id FROM fingerprints WHERE sensor_id = ? LIMIT 1");
+    $sensorOwnerStmt->bind_param('i', $sensorId);
+    $sensorOwnerStmt->execute();
+    $sensorOwner = $sensorOwnerStmt->get_result()->fetch_assoc();
+    $sensorOwnerStmt->close();
+
+    if ($sensorOwner && (int)$sensorOwner['owner_id'] !== $studentId) {
+        if ($command) {
+            $duplicateMsg = 'Duplicate fingerprint assignment rejected: sensor is already linked to another student';
+            $failStmt = $mysqli->prepare("UPDATE device_commands SET status = 'FAILED', error_message = ? WHERE id = ?");
+            $commandId = (int)$command['id'];
+            $failStmt->bind_param('si', $duplicateMsg, $commandId);
+            $failStmt->execute();
+        }
+
         $mysqli->rollback();
         api_response(409, [
             'success' => false,
-            'message' => 'Duplicate fingerprint assignment rejected: student already has a fingerprint',
+            'message' => 'Duplicate finger already enrolled. Use another finger.',
             'student_id' => $studentId,
-            'existing_sensor_id' => (int)$existingFingerprint['sensor_id']
+            'sensor_id' => $sensorId
         ]);
     }
 
