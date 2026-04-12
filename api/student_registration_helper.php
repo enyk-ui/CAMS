@@ -9,24 +9,32 @@ function studentColumnExists(mysqli $mysqli, string $columnName): bool
     return $result && $result->num_rows > 0;
 }
 
+function capitalizeEachWord(string $value): string
+{
+    $clean = trim(preg_replace('/\s+/', ' ', $value) ?? '');
+    if ($clean === '') {
+        return '';
+    }
+
+    return ucwords(strtolower($clean));
+}
+
 function normalizeStudentRegistrationInput(array $input): array
 {
     return [
-        'student_no' => trim((string)($input['student_no'] ?? $input['student_id'] ?? $input['student_id_text'] ?? '')),
-        'first_name' => trim((string)($input['first_name'] ?? '')),
-        'middle_initial' => trim((string)($input['middle_initial'] ?? '')),
-        'last_name' => trim((string)($input['last_name'] ?? '')),
-        'extension' => trim((string)($input['extension'] ?? '')),
-        'email' => trim((string)($input['email'] ?? '')),
+        'first_name' => capitalizeEachWord((string)($input['first_name'] ?? '')),
+        'middle_initial' => strtoupper(substr(trim((string)($input['middle_initial'] ?? '')), 0, 1)),
+        'last_name' => capitalizeEachWord((string)($input['last_name'] ?? '')),
+        'extension' => capitalizeEachWord((string)($input['extension'] ?? '')),
         'year' => isset($input['year']) && $input['year'] !== '' ? (int)$input['year'] : null,
-        'section' => trim((string)($input['section'] ?? '')),
+        'section' => capitalizeEachWord((string)($input['section'] ?? '')),
     ];
 }
 
 function validateStudentRegistrationRequired(array $data): ?string
 {
-    if ($data['student_no'] === '' || $data['first_name'] === '' || $data['last_name'] === '' || $data['email'] === '') {
-        return 'Missing required fields: student_id, first_name, last_name, email';
+    if ($data['first_name'] === '' || $data['last_name'] === '') {
+        return 'Missing required fields: first_name, last_name';
     }
 
     return null;
@@ -35,10 +43,8 @@ function validateStudentRegistrationRequired(array $data): ?string
 function buildStudentWriteParts(mysqli $mysqli, array $data): array
 {
     $parts = [
-        'student_id' => $data['student_no'],
         'first_name' => $data['first_name'],
         'last_name' => $data['last_name'],
-        'email' => $data['email'],
         'year' => $data['year'],
         'section' => $data['section'] !== '' ? $data['section'] : null,
     ];

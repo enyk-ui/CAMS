@@ -24,6 +24,13 @@ try {
     $sensorId = $isSuccess ? require_positive_int($input, 'sensor_id') : (int) ($input['sensor_id'] ?? 0);
     $errorMessage = trim((string) ($input['error_message'] ?? 'Enrollment failed on device'));
 
+    if ($fingerIndex !== 1) {
+        api_response(400, [
+            'success' => false,
+            'message' => 'Only one fingerprint per student is allowed (finger_index must be 1)'
+        ]);
+    }
+
     $commandLinkColumn = enrollResultColumnExists($mysqli, 'device_commands', 'student_id') ? 'student_id' : (enrollResultColumnExists($mysqli, 'device_commands', 'user_id') ? 'user_id' : null);
     $fingerprintLinkColumn = enrollResultColumnExists($mysqli, 'fingerprints', 'student_id') ? 'student_id' : (enrollResultColumnExists($mysqli, 'fingerprints', 'user_id') ? 'user_id' : null);
 
@@ -77,22 +84,30 @@ try {
 
     $mysqli->begin_transaction();
 
-    // Remove conflicting rows first to avoid duplicate fingerprint ownership.
-    $clearByStudentFingerStmt = $mysqli->prepare("DELETE FROM fingerprints WHERE {$fingerprintLinkColumn} = ? AND finger_index = ? AND sensor_id <> ?");
-    $clearByStudentFingerStmt->bind_param('iii', $studentId, $fingerIndex, $sensorId);
-    $clearByStudentFingerStmt->execute();
+    $existingFingerprintStmt = $mysqli->prepare("SELECT id, sensor_id FROM fingerprints WHERE {$fingerprintLinkColumn} = ? LIMIT 1");
+    $existingFingerprintStmt->bind_param('i', $studentId);
+    $existingFingerprintStmt->execute();
+    $existingFingerprint = $existingFingerprintStmt->get_result()->fetch_assoc();
+    $existingFingerprintStmt->close();
 
-    $clearBySensorStmt = $mysqli->prepare("DELETE FROM fingerprints WHERE sensor_id = ? AND ({$fingerprintLinkColumn} <> ? OR finger_index <> ?)");
-    $clearBySensorStmt->bind_param('iii', $sensorId, $studentId, $fingerIndex);
-    $clearBySensorStmt->execute();
+    if ($existingFingerprint && (int)$existingFingerprint['sensor_id'] !== $sensorId) {
+        $mysqli->rollback();
+        api_response(409, [
+            'success' => false,
+            'message' => 'Duplicate fingerprint assignment rejected: student already has a fingerprint',
+            'student_id' => $studentId,
+            'existing_sensor_id' => (int)$existingFingerprint['sensor_id']
+        ]);
+    }
 
-    $updateFingerprintStmt = $mysqli->prepare("UPDATE fingerprints SET sensor_id = ?, device_id = ? WHERE {$fingerprintLinkColumn} = ? AND finger_index = ? LIMIT 1");
-    $updateFingerprintStmt->bind_param('iiii', $sensorId, $deviceId, $studentId, $fingerIndex);
-    $updateFingerprintStmt->execute();
-
-    if ($updateFingerprintStmt->affected_rows === 0) {
-        $insertFingerprintStmt = $mysqli->prepare("INSERT INTO fingerprints ({$fingerprintLinkColumn}, finger_index, sensor_id, device_id) VALUES (?, ?, ?, ?)");
-        $insertFingerprintStmt->bind_param('iiii', $studentId, $fingerIndex, $sensorId, $deviceId);
+    if ($existingFingerprint) {
+        $updateFingerprintStmt = $mysqli->prepare("UPDATE fingerprints SET sensor_id = ?, device_id = ?, finger_index = 1 WHERE id = ? LIMIT 1");
+        $existingId = (int)$existingFingerprint['id'];
+        $updateFingerprintStmt->bind_param('iii', $sensorId, $deviceId, $existingId);
+        $updateFingerprintStmt->execute();
+    } else {
+        $insertFingerprintStmt = $mysqli->prepare("INSERT INTO fingerprints ({$fingerprintLinkColumn}, finger_index, sensor_id, device_id) VALUES (?, 1, ?, ?)");
+        $insertFingerprintStmt->bind_param('iii', $studentId, $sensorId, $deviceId);
         $insertFingerprintStmt->execute();
     }
 

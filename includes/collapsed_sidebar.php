@@ -6,8 +6,17 @@
 ?>
 <aside class="sidebar">
     <div class="sidebar-header">
+        <?php
+        $logoRelativePath = '../asset/logo/logo.png';
+        $logoAbsolutePath = dirname(__DIR__) . '/asset/logo/logo.png';
+        $hasLogo = is_file($logoAbsolutePath);
+        ?>
         <div class="sidebar-brand">
-            <i class="bi bi-fingerprint"></i>
+            <?php if ($hasLogo): ?>
+                <img src="<?php echo htmlspecialchars($logoRelativePath); ?>" alt="CAMS Logo" class="sidebar-logo">
+            <?php else: ?>
+                <i class="fa-solid fa-fingerprint"></i>
+            <?php endif; ?>
             <span>CAMS</span>
         </div>
     </div>
@@ -25,6 +34,11 @@
                 <span class="nav-label">Dashboard</span>
             </a>
 
+            <a href="logs.php" class="nav-item <?php echo $current_page === 'logs.php' ? 'active' : ''; ?>">
+                <i class="fa-solid fa-clock"></i>
+                <span class="nav-label">Attendance Logs</span>
+            </a>
+
             <a href="students.php" class="nav-item <?php echo $current_page === 'students.php' ? 'active' : ''; ?>">
                 <i class="fa-solid fa-users"></i>
                 <span class="nav-label">Students</span>
@@ -33,11 +47,6 @@
             <a href="register.php" class="nav-item <?php echo $current_page === 'register.php' ? 'active' : ''; ?>">
                 <i class="fa-solid fa-user-plus"></i>
                 <span class="nav-label">Registration</span>
-            </a>
-
-            <a href="logs.php" class="nav-item <?php echo $current_page === 'logs.php' ? 'active' : ''; ?>">
-                <i class="fa-solid fa-clock"></i>
-                <span class="nav-label">Attendance Logs</span>
             </a>
 
             <a href="users.php" class="nav-item <?php echo $current_page === 'users.php' ? 'active' : ''; ?>">
@@ -65,6 +74,15 @@
             <a href="attendance_report.php" class="nav-item <?php echo $current_page === 'attendance_report.php' ? 'active' : ''; ?>">
                 <i class="fa-solid fa-chart-bar"></i>
                 <span class="nav-label">Reports</span>
+            </a>
+            <a href="students.php" class="nav-item <?php echo $current_page === 'students.php' ? 'active' : ''; ?>">
+                <i class="fa-solid fa-pen-to-square"></i>
+                <span class="nav-label">Manage Students</span>
+            </a>
+
+            <a href="my_account.php" class="nav-item <?php echo $current_page === 'my_account.php' ? 'active' : ''; ?>">
+                <i class="fa-solid fa-user-circle"></i>
+                <span class="nav-label">My Account</span>
             </a>
         <?php endif; ?>
     </nav>
@@ -106,15 +124,25 @@
 }
 
 .sidebar-brand i {
-    width: 48px;
-    height: 48px;
+    width: 56px;
+    height: 56px;
     background: #ff0000;
     border-radius: 12px;
     display: flex;
     align-items: center;
     justify-content: center;
-    font-size: 1.5rem;
+    font-size: 1.8rem;
     color: white;
+    box-shadow: 0 6px 18px rgba(255, 0, 0, 0.22);
+}
+
+.sidebar-logo {
+    width: 58px;
+    height: 58px;
+    object-fit: contain;
+    border-radius: 12px;
+    background: transparent;
+    padding: 0;
     box-shadow: 0 6px 18px rgba(255, 0, 0, 0.22);
 }
 
@@ -224,9 +252,15 @@
     }
 
     .sidebar-brand i {
-        width: 42px;
-        height: 42px;
-        font-size: 1.3rem;
+        width: 48px;
+        height: 48px;
+        font-size: 1.45rem;
+    }
+
+    .sidebar-logo {
+        width: 50px;
+        height: 50px;
+        border-radius: 10px;
     }
 
     .nav-item {

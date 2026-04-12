@@ -1,26 +1,41 @@
 <?php
 /**
- * PHPMailer Configuration
- * Email settings for CAMS system
+ * Mail configuration for CAMS.
+ *
+ * Reads values from environment first, then falls back to defaults.
  */
 
+if (!function_exists('mail_env')) {
+    function mail_env(string $key, ?string $default = null): ?string
+    {
+        $value = getenv($key);
+        if ($value !== false && $value !== '') {
+            return $value;
+        }
+
+        if (isset($_ENV[$key]) && $_ENV[$key] !== '') {
+            return (string)$_ENV[$key];
+        }
+
+        if (isset($_SERVER[$key]) && $_SERVER[$key] !== '') {
+            return (string)$_SERVER[$key];
+        }
+
+        return $default;
+    }
+}
+
 // Mail Configuration
-define('MAIL_FROM_EMAIL', 'cams@criminology.edu.ph');
-define('MAIL_FROM_NAME', 'CAMS - Criminology Attendance System');
+define('MAIL_FROM_EMAIL', (string)mail_env('MAIL_FROM_EMAIL', 'cams@criminology.edu.ph'));
+define('MAIL_FROM_NAME', (string)mail_env('MAIL_FROM_NAME', 'CAMS - Criminology Attendance System'));
 
 // SMTP Server (Gmail example - change for your provider)
-define('SMTP_HOST', 'smtp.gmail.com');
-define('SMTP_PORT', 587);
-define('SMTP_USERNAME', 'your-email@gmail.com');
-define('SMTP_PASSWORD', 'your-app-password');  // Gmail: Use App Password, not regular password
-define('SMTP_ENCRYPTION', 'tls');              // 'tls' or 'ssl'
-
-// Alternative: Use sendmail (localhost mail server)
-// Uncomment below and comment out SMTP settings above
-// define('USE_SENDMAIL', true);
-
-// Fallback: Use PHP's mail() function
-// define('USE_PHP_MAIL', true);
+define('SMTP_HOST', (string)mail_env('SMTP_HOST', 'smtp.gmail.com'));
+define('SMTP_PORT', (int)mail_env('SMTP_PORT', '587'));
+define('SMTP_USERNAME', (string)mail_env('SMTP_USERNAME', ''));
+define('SMTP_PASSWORD', (string)mail_env('SMTP_PASSWORD', ''));
+define('SMTP_ENCRYPTION', (string)mail_env('SMTP_ENCRYPTION', 'tls')); // 'tls' or 'ssl'
+define('MAIL_HEADER_COLOR', (string)mail_env('MAIL_HEADER_COLOR', '#0f172a'));
 
 // Email Templates
 define('EMAIL_TEMPLATE_PRESENT', 'attendance_present');

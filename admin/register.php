@@ -6,14 +6,117 @@
 
 session_start();
 require_once '../config/db.php';
+require_once '../helpers/SchoolYearHelper.php';
 require '../includes/header.php';
 
 $years = [1, 2, 3, 4];
+
+SchoolYearHelper::ensureSchoolYearSupport($mysqli);
+$activeSchoolYear = SchoolYearHelper::getEffectiveSchoolYearRange($mysqli);
+$activeSchoolYearLabel = (string)($activeSchoolYear['label'] ?? '');
+
+function usersColumnExists(mysqli $mysqli, string $columnName): bool
+{
+    $safeColumn = $mysqli->real_escape_string($columnName);
+    $result = $mysqli->query("SHOW COLUMNS FROM users LIKE '{$safeColumn}'");
+    return $result && $result->num_rows > 0;
+}
+
+function ensureUsersAssignmentColumns(mysqli $mysqli): void
+{
+    $usersTable = $mysqli->query("SHOW TABLES LIKE 'users'");
+    if (!$usersTable || $usersTable->num_rows === 0) {
+        return;
+    }
+
+    if (!usersColumnExists($mysqli, 'year_level')) {
+        $mysqli->query("ALTER TABLE users ADD COLUMN year_level TINYINT UNSIGNED DEFAULT NULL");
+    }
+
+    if (!usersColumnExists($mysqli, 'school_year_label')) {
+        $mysqli->query("ALTER TABLE users ADD COLUMN school_year_label VARCHAR(20) DEFAULT NULL");
+    }
+
+    if (!usersColumnExists($mysqli, 'section')) {
+        $mysqli->query("ALTER TABLE users ADD COLUMN section VARCHAR(50) DEFAULT NULL");
+    }
+}
+
+function buildTeacherSectionMap(mysqli $mysqli, string $activeSchoolYearLabel): array
+{
+    $map = [];
+    $usersTable = $mysqli->query("SHOW TABLES LIKE 'users'");
+    if (!$usersTable || $usersTable->num_rows === 0) {
+        return $map;
+    }
+
+    if (!usersColumnExists($mysqli, 'year_level') || !usersColumnExists($mysqli, 'section')) {
+        return $map;
+    }
+
+    $hasSchoolYearLabel = usersColumnExists($mysqli, 'school_year_label');
+
+    $sql = "SELECT year_level, section, full_name FROM users WHERE role = 'teacher' AND status = 'active' AND year_level IS NOT NULL AND section IS NOT NULL AND TRIM(section) <> ''";
+    $types = '';
+    $params = [];
+
+    if ($hasSchoolYearLabel && $activeSchoolYearLabel !== '') {
+        $sql .= " AND (school_year_label = ? OR school_year_label IS NULL OR school_year_label = '')";
+        $types .= 's';
+        $params[] = $activeSchoolYearLabel;
+    }
+
+    $sql .= " ORDER BY year_level ASC, section ASC, full_name ASC";
+    $stmt = $mysqli->prepare($sql);
+    if (!$stmt) {
+        return $map;
+    }
+
+    if ($types !== '') {
+        $stmt->bind_param($types, ...$params);
+    }
+
+    $stmt->execute();
+    $result = $stmt->get_result();
+
+    while ($row = $result->fetch_assoc()) {
+        $year = (string)((int)($row['year_level'] ?? 0));
+        $section = trim((string)($row['section'] ?? ''));
+        $teacherName = trim((string)($row['full_name'] ?? 'Unassigned'));
+        if ($year === '0' || $section === '') {
+            continue;
+        }
+
+        if (!isset($map[$year])) {
+            $map[$year] = [];
+        }
+
+        $duplicate = false;
+        foreach ($map[$year] as $entry) {
+            if (($entry['section'] ?? '') === $section) {
+                $duplicate = true;
+                break;
+            }
+        }
+
+        if (!$duplicate) {
+            $map[$year][] = [
+                'section' => $section,
+                'teacher' => $teacherName,
+            ];
+        }
+    }
+
+    return $map;
+}
+
+ensureUsersAssignmentColumns($mysqli);
+$teacherSectionMap = buildTeacherSectionMap($mysqli, $activeSchoolYearLabel);
 ?>
 
 <div class="container">
     <div class="row">
-        <div class="col-md-8 offset-md-2">
+        <div class="col-xl-10 offset-xl-1 col-lg-11 offset-lg-0 col-md-12">
             <div class="card">
                 <div class="card-header d-flex justify-content-between align-items-center">
                     <h5 class="mb-0"><i class="bi bi-person-plus"></i> Register Student</h5>
@@ -22,6 +125,10 @@ $years = [1, 2, 3, 4];
                     </a>
                 </div>
                 <div class="card-body">
+                    <div class="alert alert-info mb-3">
+                        <i class="bi bi-mortarboard"></i>
+                        Active School Year: <strong><?php echo htmlspecialchars($activeSchoolYearLabel !== '' ? $activeSchoolYearLabel : 'N/A'); ?></strong>
+                    </div>
                     <div id="alertContainer"></div>
                     <div id="formValidationMessage" class="alert alert-warning" style="display:none;">
                         <i class="bi bi-exclamation-triangle"></i>
@@ -30,15 +137,6 @@ $years = [1, 2, 3, 4];
 
                     <form id="registrationForm" novalidate>
                         <div class="row g-3">
-                            <div class="col-md-6">
-                                <label for="studentId" class="form-label">Student ID</label>
-                                <input type="text" class="form-control" id="studentId" required>
-                            </div>
-                            <div class="col-md-6">
-                                <label for="email" class="form-label">Email</label>
-                                <input type="email" class="form-control" id="email" required>
-                            </div>
-
                             <div class="col-md-5">
                                 <label for="firstName" class="form-label">First Name</label>
                                 <input type="text" class="form-control" id="firstName" required>
@@ -51,7 +149,7 @@ $years = [1, 2, 3, 4];
                                 <label for="lastName" class="form-label">Last Name</label>
                                 <input type="text" class="form-control" id="lastName" required>
                             </div>
-                            <div class="col-md-3">
+                            <div class="col-lg-2 col-md-3">
                                 <label for="extension" class="form-label">Ext.</label>
                                 <select class="form-select" id="extension">
                                     <option value="">Select ext (optional)</option>
@@ -63,7 +161,7 @@ $years = [1, 2, 3, 4];
                                 </select>
                             </div>
 
-                            <div class="col-md-6">
+                            <div class="col-lg-4 col-md-4">
                                 <label for="year" class="form-label">Year</label>
                                 <select class="form-select" id="year" required>
                                     <option value="">Select year</option>
@@ -72,15 +170,12 @@ $years = [1, 2, 3, 4];
                                     <?php endforeach; ?>
                                 </select>
                             </div>
-                            <div class="col-md-6">
+                            <div class="col-lg-6 col-md-5">
                                 <label for="section" class="form-label">Section</label>
                                 <select class="form-select" id="section" required>
-                                    <option value="">Select section</option>
-                                    <option value="Alpha">Alpha</option>
-                                    <option value="Beta">Beta</option>
-                                    <option value="Charlie">Charlie</option>
-                                    <option value="Delta">Delta</option>
+                                    <option value="">Select year first</option>
                                 </select>
+                                <div class="form-text">Sections are loaded from teacher assignments for the selected year level.</div>
                             </div>
                         </div>
 
@@ -114,13 +209,9 @@ $years = [1, 2, 3, 4];
                 <div id="step1SelectFingers">
                     <div class="fingerprint-selector mb-4">
                         <button type="button" class="fingerprint-btn finger-btn" data-fingers="1">1</button>
-                        <button type="button" class="fingerprint-btn finger-btn" data-fingers="2">2</button>
-                        <button type="button" class="fingerprint-btn finger-btn" data-fingers="3">3</button>
-                        <button type="button" class="fingerprint-btn finger-btn" data-fingers="4">4</button>
-                        <button type="button" class="fingerprint-btn finger-btn" data-fingers="5">5</button>
                     </div>
                     <div class="alert alert-info mb-0">
-                        Select the number of fingers to enroll.
+                        Single-fingerprint enrollment is enforced.
                     </div>
                 </div>
 
@@ -195,9 +286,30 @@ $years = [1, 2, 3, 4];
     </div>
 </div>
 
+<div class="modal fade" id="postSaveModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title"><i class="bi bi-check-circle"></i> Registration Complete</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body">
+                Student registration completed with fingerprint enrollment.
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-outline-secondary" id="btnAddAnotherStudent">Add Another</button>
+                <button type="button" class="btn btn-primary" id="btnDoneToStudents">Done</button>
+            </div>
+        </div>
+    </div>
+</div>
+
 <script>
+const teacherSectionMap = <?php echo json_encode($teacherSectionMap, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES); ?>;
+
 let updateState = {
     modal: null,
+    postSaveModal: null,
     studentId: null,
     studentName: '',
     numFingers: 0,
@@ -229,12 +341,22 @@ function setFingerButtonsDisabled(disabled) {
 
 document.addEventListener('DOMContentLoaded', function () {
     updateState.modal = new bootstrap.Modal(document.getElementById('fingerprintModal'));
+    updateState.postSaveModal = new bootstrap.Modal(document.getElementById('postSaveModal'));
     updateModeIndicator('attendance');
     renderScanCircles(1);
 
     const form = document.getElementById('registrationForm');
     if (form) {
         form.addEventListener('submit', submitRegistration);
+    }
+
+    const yearSelect = document.getElementById('year');
+    const sectionSelect = document.getElementById('section');
+    if (yearSelect && sectionSelect) {
+        yearSelect.addEventListener('change', function () {
+            populateSectionOptions(this.value, '');
+        });
+        populateSectionOptions(yearSelect.value || '', sectionSelect.value || '');
     }
 
     document.querySelectorAll('.finger-btn').forEach(btn => {
@@ -263,6 +385,20 @@ document.addEventListener('DOMContentLoaded', function () {
         retryEnrollmentBtn.addEventListener('click', retryEnrollment);
     }
 
+    const doneBtn = document.getElementById('btnDoneToStudents');
+    if (doneBtn) {
+        doneBtn.addEventListener('click', function () {
+            window.location.href = 'students.php';
+        });
+    }
+
+    const addAnotherBtn = document.getElementById('btnAddAnotherStudent');
+    if (addAnotherBtn) {
+        addAnotherBtn.addEventListener('click', function () {
+            window.location.reload();
+        });
+    }
+
     document.getElementById('fingerprintModal').addEventListener('shown.bs.modal', function () {
         setScannerMode('registration');
         updateModeIndicator('registration');
@@ -278,7 +414,6 @@ document.addEventListener('DOMContentLoaded', function () {
 
         if (updateState.enrollmentCompleted) {
             if (updateState.studentFinalized) {
-                showAlert('success', 'Student registration completed with fingerprint enrollment.');
                 updateState.studentCreatedInSession = false;
                 updateState.studentId = null;
                 updateState.studentName = '';
@@ -307,15 +442,51 @@ document.addEventListener('DOMContentLoaded', function () {
     });
 });
 
+function populateSectionOptions(yearValue, selectedSection) {
+    const sectionSelect = document.getElementById('section');
+    if (!sectionSelect) {
+        return;
+    }
+
+    sectionSelect.innerHTML = '';
+
+    if (!yearValue) {
+        sectionSelect.add(new Option('Select year first', ''));
+        sectionSelect.value = '';
+        return;
+    }
+
+    const sections = teacherSectionMap[String(yearValue)] || [];
+    if (!sections.length) {
+        sectionSelect.add(new Option('No teacher section for selected year', ''));
+        sectionSelect.value = '';
+        return;
+    }
+
+    sectionSelect.add(new Option('Select section', ''));
+    sections.forEach(entry => {
+        const section = String(entry.section || '').trim();
+        const teacher = String(entry.teacher || '').trim();
+        if (!section) {
+            return;
+        }
+
+        const label = teacher ? `${section} - ${teacher}` : section;
+        sectionSelect.add(new Option(label, section));
+    });
+
+    if (selectedSection) {
+        sectionSelect.value = selectedSection;
+    }
+}
+
 function submitRegistration(e) {
     e.preventDefault();
     document.getElementById('formValidationMessage').style.display = 'none';
 
     const requiredFields = [
-        { id: 'studentId', name: 'Student ID' },
         { id: 'firstName', name: 'First Name' },
         { id: 'lastName', name: 'Last Name' },
-        { id: 'email', name: 'Email' },
         { id: 'year', name: 'Year' },
         { id: 'section', name: 'Section' }
     ];
@@ -334,12 +505,10 @@ function submitRegistration(e) {
     }
 
     const studentData = {
-        student_id: document.getElementById('studentId').value.trim(),
         first_name: document.getElementById('firstName').value.trim(),
         middle_initial: document.getElementById('middleInitial').value.trim() || '',
         last_name: document.getElementById('lastName').value.trim(),
         extension: document.getElementById('extension').value.trim() || '',
-        email: document.getElementById('email').value.trim(),
         year: document.getElementById('year').value,
         section: document.getElementById('section').value.trim()
     };
@@ -398,12 +567,10 @@ function finalizeStudentRegistration() {
 
     const payload = {
         student_id: updateState.studentId,
-        student_no: updateState.pendingStudentData.student_id,
         first_name: updateState.pendingStudentData.first_name,
         middle_initial: updateState.pendingStudentData.middle_initial || '',
         last_name: updateState.pendingStudentData.last_name,
         extension: updateState.pendingStudentData.extension || '',
-        email: updateState.pendingStudentData.email,
         year: updateState.pendingStudentData.year || null,
         section: updateState.pendingStudentData.section || '',
         finalize: true
@@ -628,7 +795,7 @@ async function startEnrollment() {
     .catch(error => {
         updateState.isStartingEnrollment = false;
         setFingerButtonsDisabled(false);
-        showError('Connection error: ' + error.message);
+        showError('Device offline or API unreachable: ' + error.message);
     });
 }
 
@@ -661,7 +828,7 @@ function beginEnrollmentMonitor() {
             if (!data.success) {
                 updateState.pollFailures += 1;
                 if (updateState.pollFailures >= 3) {
-                    showError('Unable to read scanner mode. Check server connection and try again.');
+                    showError('Device offline or not responding. Check scanner/ESP power and network, then retry.');
                 }
                 return;
             }
@@ -732,8 +899,14 @@ function beginEnrollmentMonitor() {
             }
 
             if (data.mode === 'attendance' && updateState.registrationId) {
-                if (updateState.lastServerFinger <= updateState.numFingers) {
-                    markFingerCompleted(updateState.lastServerFinger);
+                if (updateState.currentScanStep < updateState.scanStepsPerFinger) {
+                    updateState.currentScanStep = updateState.scanStepsPerFinger;
+                    updateProgress();
+                }
+
+                const finalFinger = Math.min(updateState.lastServerFinger, updateState.numFingers);
+                if (finalFinger >= 1 && finalFinger <= updateState.numFingers) {
+                    markFingerCompleted(finalFinger);
                 }
                 if (data.last_sensor_id) {
                     showWaitingMessage(`Registered (ID: ${data.last_sensor_id})`);
@@ -898,8 +1071,10 @@ async function saveStudentRecord() {
 
         updateState.studentFinalized = true;
         updateState.studentCreatedInSession = false;
-        showAlert('success', 'Student data saved successfully.');
         updateState.modal.hide();
+        if (updateState.postSaveModal) {
+            updateState.postSaveModal.show();
+        }
     } catch (error) {
         showAlert('danger', 'Failed to save student data: ' + error.message);
         appendDebug('Save student failed: ' + error.message);

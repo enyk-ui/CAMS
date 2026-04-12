@@ -233,6 +233,25 @@ function executeRepairQueries(mysqli $conn): array
         "INSERT IGNORE INTO devices (id, device_key, name, is_active, created_at)
          VALUES (1, 'CAMS_ESP8266', 'Default Scanner', 1, NOW())",
 
+        // Ensure attendance table exists in daily summary format.
+        "CREATE TABLE IF NOT EXISTS attendance (
+            id INT(11) NOT NULL AUTO_INCREMENT,
+            student_id INT(11) NOT NULL,
+            attendance_date DATE NOT NULL,
+            time_in_am TIME DEFAULT NULL,
+            time_out_am TIME DEFAULT NULL,
+            time_in_pm TIME DEFAULT NULL,
+            time_out_pm TIME DEFAULT NULL,
+            status ENUM('present','late','absent','excused') DEFAULT 'absent',
+            notes TEXT DEFAULT NULL,
+            created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            PRIMARY KEY (id),
+            UNIQUE KEY unique_attendance_per_day (student_id, attendance_date),
+            KEY idx_attendance_date (attendance_date),
+            KEY idx_status (status)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci",
+
         // Ensure attendance_logs exists in the format used by API.
         "CREATE TABLE IF NOT EXISTS attendance_logs (
             id INT(11) NOT NULL AUTO_INCREMENT,

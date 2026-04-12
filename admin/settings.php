@@ -74,6 +74,130 @@ function ensureUsersAdminSchema(mysqli $mysqli): bool
     return true;
 }
 
+function ensureSectionTeacherScheduleSchema(mysqli $mysqli): void
+{
+    $mysqli->query(
+        "CREATE TABLE IF NOT EXISTS sections (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            name VARCHAR(100) NOT NULL,
+            year_grade VARCHAR(20) NOT NULL,
+            created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            UNIQUE KEY uniq_section_name_year (name, year_grade)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci"
+    );
+
+    $mysqli->query(
+        "CREATE TABLE IF NOT EXISTS teacher_sections (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            teacher_id INT NOT NULL,
+            section_id INT NOT NULL,
+            created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE KEY uniq_teacher_section (teacher_id, section_id),
+            UNIQUE KEY uniq_section_teacher (section_id)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci"
+    );
+
+    $mysqli->query(
+        "CREATE TABLE IF NOT EXISTS teacher_daily_schedules (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            teacher_id INT NOT NULL,
+            section_id INT DEFAULT NULL,
+            day_of_week TINYINT UNSIGNED NOT NULL,
+            start_time TIME NOT NULL,
+            end_time TIME NOT NULL,
+            late_threshold_minutes INT UNSIGNED NOT NULL DEFAULT 15,
+            created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            UNIQUE KEY uniq_teacher_section_day (teacher_id, section_id, day_of_week)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci"
+    );
+
+    $sectionIdColumn = $mysqli->query("SHOW COLUMNS FROM teacher_daily_schedules LIKE 'section_id'");
+    if ($sectionIdColumn && $sectionIdColumn->num_rows === 0) {
+        $mysqli->query("ALTER TABLE teacher_daily_schedules ADD COLUMN section_id INT DEFAULT NULL AFTER teacher_id");
+    }
+
+    $oldUnique = $mysqli->query("SHOW INDEX FROM teacher_daily_schedules WHERE Key_name = 'uniq_teacher_day'");
+    if ($oldUnique && $oldUnique->num_rows > 0) {
+        $mysqli->query("ALTER TABLE teacher_daily_schedules DROP INDEX uniq_teacher_day");
+    }
+
+    $newUnique = $mysqli->query("SHOW INDEX FROM teacher_daily_schedules WHERE Key_name = 'uniq_teacher_section_day'");
+    if ($newUnique && $newUnique->num_rows === 0) {
+        $mysqli->query("ALTER TABLE teacher_daily_schedules ADD UNIQUE KEY uniq_teacher_section_day (teacher_id, section_id, day_of_week)");
+    }
+
+    // Backfill section_id for legacy rows using teacher_sections mapping.
+    $mysqli->query(
+        "UPDATE teacher_daily_schedules tds
+         JOIN teacher_sections ts ON ts.teacher_id = tds.teacher_id
+         SET tds.section_id = ts.section_id
+         WHERE tds.section_id IS NULL"
+    );
+}
+
+function fetchTeacherSectionAssignments(mysqli $mysqli): array
+{
+    $rows = [];
+    $sql = "
+        SELECT
+            ts.teacher_id,
+            ts.section_id,
+            COALESCE(u.full_name, CONCAT('Teacher #', ts.teacher_id)) AS teacher_name,
+            COALESCE(u.email, '') AS teacher_email,
+            COALESCE(s.year_grade, '') AS year_grade,
+            COALESCE(s.name, '') AS section_name
+        FROM teacher_sections ts
+        LEFT JOIN users u ON u.id = ts.teacher_id
+        LEFT JOIN sections s ON s.id = ts.section_id
+        ORDER BY CAST(COALESCE(s.year_grade, '0') AS UNSIGNED) ASC, s.name ASC, teacher_name ASC
+    ";
+    $result = $mysqli->query($sql);
+    if (!$result) {
+        return $rows;
+    }
+
+    while ($row = $result->fetch_assoc()) {
+        $rows[] = $row;
+    }
+
+    return $rows;
+}
+
+function fetchSectionTeacherSchedules(mysqli $mysqli): array
+{
+    $rows = [];
+    $sql = "
+        SELECT
+            tds.id,
+            tds.teacher_id,
+            tds.section_id,
+            tds.day_of_week,
+            tds.start_time,
+            tds.end_time,
+            tds.late_threshold_minutes,
+            COALESCE(u.full_name, CONCAT('Teacher #', tds.teacher_id)) AS teacher_name,
+            COALESCE(s.year_grade, '') AS year_grade,
+            COALESCE(s.name, '') AS section_name
+        FROM teacher_daily_schedules tds
+        LEFT JOIN users u ON u.id = tds.teacher_id
+        LEFT JOIN sections s ON s.id = tds.section_id
+        ORDER BY CAST(COALESCE(s.year_grade, '0') AS UNSIGNED) ASC, s.name ASC, tds.day_of_week ASC
+    ";
+
+    $result = $mysqli->query($sql);
+    if (!$result) {
+        return $rows;
+    }
+
+    while ($row = $result->fetch_assoc()) {
+        $rows[] = $row;
+    }
+
+    return $rows;
+}
+
 $message = '';
 $message_type = '';
 
@@ -82,32 +206,78 @@ if (!SchoolYearHelper::ensureSchoolYearSupport($mysqli)) {
     $message_type = 'danger';
 }
 
+ensureSectionTeacherScheduleSchema($mysqli);
+
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    $action = $_POST['action'] ?? 'save_settings';
+    $action = $_POST['action'] ?? 'save_section_schedule';
 
-    if ($action === 'save_settings') {
-        $settings_to_update = [
-            'late_threshold_minutes' => $_POST['late_threshold'] ?? '',
-            'absent_threshold_hours' => $_POST['absent_threshold'] ?? '',
-            'am_start_time' => $_POST['am_start'] ?? '',
-            'am_end_time' => $_POST['am_end'] ?? '',
-            'pm_start_time' => $_POST['pm_start'] ?? '',
-            'pm_end_time' => $_POST['pm_end'] ?? ''
-        ];
+    if ($action === 'save_section_schedule') {
+        $sectionId = (int)($_POST['section_id'] ?? 0);
+        $dayOfWeek = (int)($_POST['day_of_week'] ?? 0);
+        $startTime = trim((string)($_POST['start_time'] ?? ''));
+        $endTime = trim((string)($_POST['end_time'] ?? ''));
+        $lateThreshold = (int)($_POST['late_threshold_minutes'] ?? 15);
 
-        foreach ($settings_to_update as $key => $value) {
-            if ($value !== '') {
-                SchoolYearHelper::upsertSetting($mysqli, $key, (string) $value);
+        if ($sectionId <= 0 || $dayOfWeek < 1 || $dayOfWeek > 5 || $startTime === '' || $endTime === '') {
+            $message = 'Please complete section, day, and time fields.';
+            $message_type = 'danger';
+        } elseif (!preg_match('/^\d{2}:\d{2}$/', $startTime) || !preg_match('/^\d{2}:\d{2}$/', $endTime)) {
+            $message = 'Time in and time out must be valid HH:MM values.';
+            $message_type = 'danger';
+        } else {
+            $mapStmt = $mysqli->prepare('SELECT teacher_id FROM teacher_sections WHERE section_id = ? LIMIT 1');
+            $mapStmt->bind_param('i', $sectionId);
+            $mapStmt->execute();
+            $mapRow = $mapStmt->get_result()->fetch_assoc();
+            $mapStmt->close();
+
+            if (!$mapRow) {
+                $message = 'Selected section has no assigned teacher. Assign teacher in Teachers page first.';
+                $message_type = 'danger';
+            } else {
+                $teacherId = (int)$mapRow['teacher_id'];
+                $lateThreshold = max(0, $lateThreshold);
+                $startTimeFull = $startTime . ':00';
+                $endTimeFull = $endTime . ':00';
+
+                $stmt = $mysqli->prepare(
+                    "INSERT INTO teacher_daily_schedules (teacher_id, section_id, day_of_week, start_time, end_time, late_threshold_minutes)
+                     VALUES (?, ?, ?, ?, ?, ?)
+                     ON DUPLICATE KEY UPDATE
+                        start_time = VALUES(start_time),
+                        end_time = VALUES(end_time),
+                        late_threshold_minutes = VALUES(late_threshold_minutes),
+                        updated_at = CURRENT_TIMESTAMP"
+                );
+                $stmt->bind_param('iiissi', $teacherId, $sectionId, $dayOfWeek, $startTimeFull, $endTimeFull, $lateThreshold);
+
+                if ($stmt->execute()) {
+                    $message = 'Section-teacher schedule saved successfully.';
+                    $message_type = 'success';
+                } else {
+                    $message = 'Unable to save schedule: ' . $stmt->error;
+                    $message_type = 'danger';
+                }
+                $stmt->close();
             }
         }
-
-        $activeYear = SchoolYearHelper::getActiveSchoolYear($mysqli);
-        if ($activeYear && !empty($activeYear['label'])) {
-            SchoolYearHelper::upsertSetting($mysqli, 'school_year', $activeYear['label']);
+    } elseif ($action === 'delete_section_schedule') {
+        $scheduleId = (int)($_POST['schedule_id'] ?? 0);
+        if ($scheduleId <= 0) {
+            $message = 'Invalid schedule id.';
+            $message_type = 'danger';
+        } else {
+            $stmt = $mysqli->prepare('DELETE FROM teacher_daily_schedules WHERE id = ? LIMIT 1');
+            $stmt->bind_param('i', $scheduleId);
+            if ($stmt->execute()) {
+                $message = 'Schedule deleted successfully.';
+                $message_type = 'success';
+            } else {
+                $message = 'Unable to delete schedule.';
+                $message_type = 'danger';
+            }
+            $stmt->close();
         }
-
-        $message = 'Settings updated successfully!';
-        $message_type = 'success';
     } elseif ($action === 'set_active_school_year') {
         $schoolYearId = (int) ($_POST['school_year_id'] ?? 0);
         if ($schoolYearId > 0 && SchoolYearHelper::setActiveSchoolYear($mysqli, $schoolYearId)) {
@@ -234,22 +404,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
 }
 
-$settings = [];
-if ($result = $mysqli->query('SELECT setting_key, setting_value FROM settings')) {
-    while ($row = $result->fetch_assoc()) {
-        $settings[$row['setting_key']] = $row['setting_value'];
-    }
-}
-
 $activeSchoolYear = SchoolYearHelper::getEffectiveSchoolYearRange($mysqli);
 $schoolYears = SchoolYearHelper::getAllSchoolYears($mysqli);
-
-$late_threshold = $settings['late_threshold_minutes'] ?? '15';
-$absent_threshold = $settings['absent_threshold_hours'] ?? '2';
-$am_start = $settings['am_start_time'] ?? '08:00:00';
-$am_end = $settings['am_end_time'] ?? '12:00:00';
-$pm_start = $settings['pm_start_time'] ?? '13:00:00';
-$pm_end = $settings['pm_end_time'] ?? '17:00:00';
+$teacherSectionAssignments = fetchTeacherSectionAssignments($mysqli);
+$sectionTeacherSchedules = fetchSectionTeacherSchedules($mysqli);
+$dayLabels = [
+    1 => 'Monday',
+    2 => 'Tuesday',
+    3 => 'Wednesday',
+    4 => 'Thursday',
+    5 => 'Friday',
+];
 
 $sessionEmail = trim((string) ($_SESSION['admin_email'] ?? ''));
 $sessionName = trim((string) ($_SESSION['admin_name'] ?? ''));
@@ -309,72 +474,111 @@ if (ensureUsersAdminSchema($mysqli)) {
     (<?php echo htmlspecialchars($activeSchoolYear['start_date'] ?? ''); ?> to <?php echo htmlspecialchars($activeSchoolYear['end_date'] ?? ''); ?>)
 </div>
 
-<form method="POST" class="row">
-    <input type="hidden" name="action" value="save_settings">
-
+<div class="row">
     <div class="col-lg-12 mb-4">
         <div class="card">
             <div class="card-header">
-                <h5 class="mb-0"><i class="bi bi-calendar2-week"></i> Attendance Configuration</h5>
+                <h5 class="mb-0"><i class="bi bi-calendar2-week"></i> Section-Teacher Scheduling</h5>
             </div>
             <div class="card-body">
-                <div class="row g-4">
-                    <div class="col-lg-6">
-                        <h6 class="mb-3"><i class="bi bi-clock"></i> Attendance Thresholds</h6>
-                        <div class="mb-3">
-                            <label for="late_threshold" class="form-label">Late Threshold (Minutes)</label>
-                            <p class="form-text text-muted small">Minutes after AM start time to mark as late</p>
-                            <input type="number" class="form-control" id="late_threshold" name="late_threshold"
-                                   value="<?php echo htmlspecialchars($late_threshold); ?>" min="0" max="60">
-                        </div>
+                <form method="POST" class="row g-3">
+                    <input type="hidden" name="action" value="save_section_schedule">
 
-                        <div class="mb-0">
-                            <label for="absent_threshold" class="form-label">Absent Threshold (Hours)</label>
-                            <p class="form-text text-muted small">Hours after AM start to mark as absent if no scan</p>
-                            <input type="number" class="form-control" id="absent_threshold" name="absent_threshold"
-                                   value="<?php echo htmlspecialchars($absent_threshold); ?>" min="0" max="12">
-                        </div>
+                    <div class="col-md-4">
+                        <label for="section_id" class="form-label">Section (Teacher Assigned)</label>
+                        <select class="form-select" id="section_id" name="section_id" required>
+                            <option value="">Select section</option>
+                            <?php foreach ($teacherSectionAssignments as $assignment): ?>
+                                <?php
+                                $sectionLabel = trim((string)($assignment['year_grade'] ?? '')) . ' - ' . trim((string)($assignment['section_name'] ?? ''));
+                                $teacherLabel = trim((string)($assignment['teacher_name'] ?? 'Teacher'));
+                                ?>
+                                <option value="<?php echo (int)$assignment['section_id']; ?>">
+                                    <?php echo htmlspecialchars($sectionLabel . ' | ' . $teacherLabel); ?>
+                                </option>
+                            <?php endforeach; ?>
+                        </select>
                     </div>
 
-                    <div class="col-lg-6">
-                        <h6 class="mb-3"><i class="bi bi-calendar-event"></i> Session Schedule</h6>
-                        <div class="row mb-3">
-                            <div class="col-6">
-                                <label for="am_start" class="form-label">AM Start Time</label>
-                                <input type="time" class="form-control" id="am_start" name="am_start"
-                                       value="<?php echo htmlspecialchars(substr($am_start, 0, 5)); ?>">
-                            </div>
-                            <div class="col-6">
-                                <label for="am_end" class="form-label">AM End Time</label>
-                                <input type="time" class="form-control" id="am_end" name="am_end"
-                                       value="<?php echo htmlspecialchars(substr($am_end, 0, 5)); ?>">
-                            </div>
-                        </div>
-
-                        <div class="row mb-0">
-                            <div class="col-6">
-                                <label for="pm_start" class="form-label">PM Start Time</label>
-                                <input type="time" class="form-control" id="pm_start" name="pm_start"
-                                       value="<?php echo htmlspecialchars(substr($pm_start, 0, 5)); ?>">
-                            </div>
-                            <div class="col-6">
-                                <label for="pm_end" class="form-label">PM End Time</label>
-                                <input type="time" class="form-control" id="pm_end" name="pm_end"
-                                       value="<?php echo htmlspecialchars(substr($pm_end, 0, 5)); ?>">
-                            </div>
-                        </div>
+                    <div class="col-md-2">
+                        <label for="day_of_week" class="form-label">Day</label>
+                        <select class="form-select" id="day_of_week" name="day_of_week" required>
+                            <option value="1">Monday</option>
+                            <option value="2">Tuesday</option>
+                            <option value="3">Wednesday</option>
+                            <option value="4">Thursday</option>
+                            <option value="5">Friday</option>
+                        </select>
                     </div>
+
+                    <div class="col-md-2">
+                        <label for="start_time" class="form-label">Time In</label>
+                        <input type="time" class="form-control" id="start_time" name="start_time" value="08:00" required>
+                    </div>
+
+                    <div class="col-md-2">
+                        <label for="end_time" class="form-label">Time Out</label>
+                        <input type="time" class="form-control" id="end_time" name="end_time" value="17:00" required>
+                    </div>
+
+                    <div class="col-md-2">
+                        <label for="late_threshold_minutes" class="form-label">Late (mins)</label>
+                        <input type="number" class="form-control" id="late_threshold_minutes" name="late_threshold_minutes" value="15" min="0" max="120" required>
+                    </div>
+
+                    <div class="col-12 text-end">
+                        <button type="submit" class="btn btn-primary btn-lg">
+                            <i class="bi bi-check-circle"></i> Save Schedule
+                        </button>
+                    </div>
+                </form>
+
+                <hr>
+
+                <div class="table-responsive">
+                    <table class="table table-sm table-hover mb-0">
+                        <thead class="table-light">
+                            <tr>
+                                <th>Section</th>
+                                <th>Teacher</th>
+                                <th>Day</th>
+                                <th>Time In</th>
+                                <th>Time Out</th>
+                                <th>Late (mins)</th>
+                                <th>Action</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <?php if (empty($sectionTeacherSchedules)): ?>
+                                <tr>
+                                    <td colspan="7" class="text-center text-muted py-3">No section-teacher schedules configured.</td>
+                                </tr>
+                            <?php else: ?>
+                                <?php foreach ($sectionTeacherSchedules as $row): ?>
+                                    <tr>
+                                        <td><?php echo htmlspecialchars(trim((string)$row['year_grade']) . ' - ' . trim((string)$row['section_name'])); ?></td>
+                                        <td><?php echo htmlspecialchars((string)$row['teacher_name']); ?></td>
+                                        <td><?php echo htmlspecialchars($dayLabels[(int)$row['day_of_week']] ?? ('Day ' . (int)$row['day_of_week'])); ?></td>
+                                        <td><?php echo htmlspecialchars(substr((string)$row['start_time'], 0, 5)); ?></td>
+                                        <td><?php echo htmlspecialchars(substr((string)$row['end_time'], 0, 5)); ?></td>
+                                        <td><?php echo (int)$row['late_threshold_minutes']; ?></td>
+                                        <td>
+                                            <form method="POST" class="d-inline" onsubmit="return confirm('Delete this schedule?');">
+                                                <input type="hidden" name="action" value="delete_section_schedule">
+                                                <input type="hidden" name="schedule_id" value="<?php echo (int)$row['id']; ?>">
+                                                <button type="submit" class="btn btn-sm btn-outline-danger">Delete</button>
+                                            </form>
+                                        </td>
+                                    </tr>
+                                <?php endforeach; ?>
+                            <?php endif; ?>
+                        </tbody>
+                    </table>
                 </div>
             </div>
         </div>
     </div>
-
-    <div class="col-lg-12">
-        <button type="submit" class="btn btn-primary btn-lg">
-            <i class="bi bi-check-circle"></i> Save Settings
-        </button>
-    </div>
-</form>
+</div>
 
 <div class="row mt-4">
     <div class="col-lg-12 mb-4">

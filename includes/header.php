@@ -34,6 +34,31 @@ $user_role = RoleHelper::getRole();
 $user_email = RoleHelper::getUserEmail();
 $user_section = RoleHelper::getTeacherSection();
 
+// Backfill missing teacher section for older sessions so teacher pages do not
+// raise notices when they read the session directly.
+if ($user_role === 'teacher' && (!isset($_SESSION['teacher_section']) || trim((string)$_SESSION['teacher_section']) === '')) {
+    if (isset($mysqli) && $mysqli instanceof mysqli) {
+        $teacherId = RoleHelper::getUserId();
+        if ($teacherId !== null) {
+            $stmt = $mysqli->prepare('SELECT section FROM users WHERE id = ? AND role = "teacher" LIMIT 1');
+            if ($stmt) {
+                $stmt->bind_param('i', $teacherId);
+                $stmt->execute();
+                $teacherRow = $stmt->get_result()->fetch_assoc();
+                $resolvedSection = trim((string)($teacherRow['section'] ?? ''));
+                if ($resolvedSection !== '') {
+                    $_SESSION['teacher_section'] = $resolvedSection;
+                    $user_section = $resolvedSection;
+                }
+            }
+        }
+    }
+
+    if (!isset($_SESSION['teacher_section'])) {
+        $_SESSION['teacher_section'] = '';
+    }
+}
+
 // Dynamic page title based on current file
 function getPageTitle() {
     $current_file = basename($_SERVER['PHP_SELF'], '.php');
@@ -47,7 +72,8 @@ function getPageTitle() {
         'users' => 'Teachers',
         'my_class' => 'My Class',
         'attendance_report' => 'Attendance Reports',
-        'profile' => 'Profile'
+        'profile' => 'Profile',
+        'my_account' => 'My Account'
     ];
     
     return $page_titles[$current_file] ?? 'CAMS';
@@ -65,7 +91,8 @@ function getPageSubtitle() {
         'settings' => 'System configuration and preferences',
         'users' => 'Manage teacher accounts',
         'my_class' => 'Your assigned students and attendance',
-        'attendance_report' => 'Generate and view attendance reports'
+        'attendance_report' => 'Generate and view attendance reports',
+        'my_account' => 'Manage your teacher account'
     ];
     
     return $page_subtitles[$current_file] ?? '';

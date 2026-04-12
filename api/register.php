@@ -4,7 +4,6 @@ declare(strict_types=1);
 
 require_once __DIR__ . '/common.php';
 require_once __DIR__ . '/../config/db.php';
-require_once __DIR__ . '/student_registration_helper.php';
 
 require_method('POST');
 
@@ -37,6 +36,94 @@ function ensureDeviceCommandProgressColumns(mysqli $mysqli): void
     }
 }
 
+function registerColumnExists(mysqli $mysqli, string $table, string $column): bool
+{
+    $safeTable = $mysqli->real_escape_string($table);
+    $safeColumn = $mysqli->real_escape_string($column);
+    $result = $mysqli->query("SHOW COLUMNS FROM {$safeTable} LIKE '{$safeColumn}'");
+    return $result && $result->num_rows > 0;
+}
+
+function normalizeName(string $value): string
+{
+    $clean = trim(preg_replace('/\s+/', ' ', $value) ?? '');
+    return $clean === '' ? '' : ucwords(strtolower($clean));
+}
+
+function bindTypeForValue($value): string
+{
+    return is_int($value) ? 'i' : 's';
+}
+
+function detectStudentDuplicateConflict(mysqli $mysqli, array $writeMap, int $excludeStudentId = 0): ?string
+{
+    if (registerColumnExists($mysqli, 'students', 'student_id') && isset($writeMap['student_id']) && trim((string)$writeMap['student_id']) !== '') {
+        $studentNo = trim((string)$writeMap['student_id']);
+        if ($excludeStudentId > 0) {
+            $stmt = $mysqli->prepare('SELECT id FROM students WHERE student_id = ? AND id <> ? LIMIT 1');
+            if ($stmt) {
+                $stmt->bind_param('si', $studentNo, $excludeStudentId);
+                $stmt->execute();
+                $exists = (bool)$stmt->get_result()->fetch_assoc();
+                $stmt->close();
+                if ($exists) {
+                    return 'Student ID already exists.';
+                }
+            }
+        } else {
+            $stmt = $mysqli->prepare('SELECT id FROM students WHERE student_id = ? LIMIT 1');
+            if ($stmt) {
+                $stmt->bind_param('s', $studentNo);
+                $stmt->execute();
+                $exists = (bool)$stmt->get_result()->fetch_assoc();
+                $stmt->close();
+                if ($exists) {
+                    return 'Student ID already exists.';
+                }
+            }
+        }
+    }
+
+    if (registerColumnExists($mysqli, 'students', 'email') && isset($writeMap['email']) && trim((string)$writeMap['email']) !== '') {
+        $email = trim((string)$writeMap['email']);
+        if ($excludeStudentId > 0) {
+            $stmt = $mysqli->prepare('SELECT id FROM students WHERE email = ? AND id <> ? LIMIT 1');
+            if ($stmt) {
+                $stmt->bind_param('si', $email, $excludeStudentId);
+                $stmt->execute();
+                $exists = (bool)$stmt->get_result()->fetch_assoc();
+                $stmt->close();
+                if ($exists) {
+                    return 'Email already exists.';
+                }
+            }
+        } else {
+            $stmt = $mysqli->prepare('SELECT id FROM students WHERE email = ? LIMIT 1');
+            if ($stmt) {
+                $stmt->bind_param('s', $email);
+                $stmt->execute();
+                $exists = (bool)$stmt->get_result()->fetch_assoc();
+                $stmt->close();
+                if ($exists) {
+                    return 'Email already exists.';
+                }
+            }
+        }
+    }
+
+    return null;
+}
+
+function userFriendlyDuplicateMessage(string $rawMessage): string
+{
+    $msg = strtolower($rawMessage);
+    if (strpos($msg, 'student_id') !== false || strpos($msg, 'student_no') !== false) {
+        return 'Student record already exists.';
+    }
+
+    return 'Student record already exists.';
+}
+
 try {
     $input = read_json_body();
     ensureDeviceCommandProgressColumns($mysqli);
@@ -50,10 +137,10 @@ try {
         $totalFingers = require_positive_int($input, 'total_fingers');
         $deviceId = isset($input['device_id']) ? require_positive_int($input, 'device_id') : 1;
 
-        if ($totalFingers < 1 || $totalFingers > 5) {
+        if ($totalFingers !== 1) {
             api_response(400, [
                 'success' => false,
-                'message' => 'total_fingers must be from 1 to 5'
+                'message' => 'Only one fingerprint is allowed per student (total_fingers must be 1)'
             ]);
         }
 
@@ -107,10 +194,10 @@ try {
         $studentId = require_positive_int($input, 'student_id');
         $totalFingers = require_positive_int($input, 'total_fingers');
 
-        if ($totalFingers < 1 || $totalFingers > 5) {
+        if ($totalFingers !== 1) {
             api_response(400, [
                 'success' => false,
-                'message' => 'total_fingers must be from 1 to 5'
+                'message' => 'Only one fingerprint is allowed per student (total_fingers must be 1)'
             ]);
         }
 
@@ -229,12 +316,11 @@ try {
         : (isset($input['student_no']) || isset($input['student_id_text']));
 
     if ($deferSave) {
-        $tempStudentId = 'TMP-' . strtoupper(bin2hex(random_bytes(6)));
         $tempFirstName = 'PENDING';
         $tempLastName = 'REGISTRATION';
 
-        $stmt = $mysqli->prepare("INSERT INTO students (student_id, first_name, last_name, status) VALUES (?, ?, ?, 'inactive')");
-        $stmt->bind_param('sss', $tempStudentId, $tempFirstName, $tempLastName);
+        $stmt = $mysqli->prepare("INSERT INTO students (first_name, last_name, status) VALUES (?, ?, 'inactive')");
+        $stmt->bind_param('ss', $tempFirstName, $tempLastName);
         $stmt->execute();
 
         api_response(200, [
@@ -245,16 +331,80 @@ try {
         ]);
     }
 
-    $studentData = normalizeStudentRegistrationInput($input);
-    $validationError = validateStudentRegistrationRequired($studentData);
-    if ($validationError !== null) {
+    $sectionId = isset($input['section_id']) ? (int)$input['section_id'] : 0;
+    $firstName = normalizeName((string)($input['first_name'] ?? ''));
+    $lastName = normalizeName((string)($input['last_name'] ?? ''));
+    $middleInitial = strtoupper(substr(trim((string)($input['middle_initial'] ?? '')), 0, 1));
+    $extension = normalizeName((string)($input['extension'] ?? ''));
+
+    if ($firstName === '' || $lastName === '') {
         api_response(400, [
             'success' => false,
-            'message' => $validationError
+            'message' => 'Missing required fields: first_name, last_name, section_id'
         ]);
     }
 
-    $writeMap = buildStudentWriteParts($mysqli, $studentData);
+    if ($sectionId <= 0) {
+        $legacyYear = isset($input['year']) ? (int)$input['year'] : 0;
+        $legacySection = trim((string)($input['section'] ?? ''));
+        if ($legacyYear > 0 && $legacySection !== '') {
+            $legacySectionStmt = $mysqli->prepare('SELECT id FROM sections WHERE year_grade = ? AND name = ? LIMIT 1');
+            if ($legacySectionStmt) {
+                $legacyYearText = (string)$legacyYear;
+                $legacySectionStmt->bind_param('ss', $legacyYearText, $legacySection);
+                $legacySectionStmt->execute();
+                $legacySectionRow = $legacySectionStmt->get_result()->fetch_assoc();
+                $legacySectionStmt->close();
+                if ($legacySectionRow) {
+                    $sectionId = (int)$legacySectionRow['id'];
+                }
+            }
+        }
+    }
+
+    if ($sectionId <= 0) {
+        api_response(400, [
+            'success' => false,
+            'message' => 'Missing required fields: section_id'
+        ]);
+    }
+
+    $writeMap = [
+        'first_name' => $firstName,
+        'last_name' => $lastName,
+    ];
+
+    if (registerColumnExists($mysqli, 'students', 'middle_initial')) {
+        $writeMap['middle_initial'] = $middleInitial;
+    }
+    if (registerColumnExists($mysqli, 'students', 'extension')) {
+        $writeMap['extension'] = $extension;
+    }
+    if (registerColumnExists($mysqli, 'students', 'section_id')) {
+        $writeMap['section_id'] = $sectionId;
+    }
+
+    $sectionMetaStmt = $mysqli->prepare('SELECT name, year_grade FROM sections WHERE id = ? LIMIT 1');
+    if ($sectionMetaStmt) {
+        $sectionMetaStmt->bind_param('i', $sectionId);
+        $sectionMetaStmt->execute();
+        $sectionMeta = $sectionMetaStmt->get_result()->fetch_assoc();
+        $sectionMetaStmt->close();
+
+        if (!$sectionMeta) {
+            api_response(404, [
+                'success' => false,
+                'message' => 'section_id not found'
+            ]);
+        }
+
+        if (registerColumnExists($mysqli, 'students', 'section')) {
+            $writeMap['section'] = (string)$sectionMeta['name'];
+        }
+        if (registerColumnExists($mysqli, 'students', 'year')) {
+            $writeMap['year'] = (int)$sectionMeta['year_grade'];
+        }
+    }
 
     if ($finalizeSave) {
         $studentId = require_positive_int($input, 'student_id');
@@ -294,9 +444,12 @@ try {
         api_response(200, [
             'success' => true,
             'message' => 'Student record finalized',
-            'student_id' => $studentId
+            'student_id' => $studentId,
+            'section_id' => $sectionId
         ]);
     }
+
+    $writeMap['status'] = 'active';
 
     $columns = array_keys($writeMap);
     $values = array_values($writeMap);
@@ -308,7 +461,7 @@ try {
 
     $columnSql = implode(', ', $columns);
     $placeholderSql = rtrim(str_repeat('?, ', count($values)), ', ');
-    $stmt = $mysqli->prepare("INSERT INTO students ({$columnSql}) VALUES ({$placeholderSql}, 'active')");
+    $stmt = $mysqli->prepare("INSERT INTO students ({$columnSql}) VALUES ({$placeholderSql})");
     $bindParams = [$types];
     foreach ($values as $index => $value) {
         $bindParams[] = &$values[$index];
@@ -319,16 +472,20 @@ try {
     api_response(200, [
         'success' => true,
         'message' => 'Student created',
-        'student_id' => (int)$mysqli->insert_id
+        'student_id' => (int)$mysqli->insert_id,
+        'section_id' => $sectionId
     ]);
 } catch (Throwable $e) {
     $message = $e->getMessage();
     if (stripos($message, 'Duplicate entry') !== false) {
-        $message = 'Student ID or email already exists';
+        api_response(409, [
+            'success' => false,
+            'message' => userFriendlyDuplicateMessage($message)
+        ]);
     }
 
     api_response(500, [
         'success' => false,
-        'message' => $message
+        'message' => 'Unable to save student record. Please try again.'
     ]);
 }

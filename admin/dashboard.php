@@ -82,6 +82,25 @@ $stats = [
     'absent' => 0,
 ];
 
+$analyticsSectionOptions = [];
+if ($hasStudents && tableExists($mysqli, 'sections') && columnExists($mysqli, 'students', 'section_id')) {
+    $sectionResult = $mysqli->query(
+        "SELECT sec.id, sec.year_grade, sec.name
+         FROM sections sec
+         INNER JOIN students s ON s.section_id = sec.id
+         GROUP BY sec.id, sec.year_grade, sec.name
+         ORDER BY CAST(sec.year_grade AS UNSIGNED) ASC, sec.name ASC"
+    );
+    if ($sectionResult) {
+        while ($sectionRow = $sectionResult->fetch_assoc()) {
+            $analyticsSectionOptions[] = [
+                'id' => (int)($sectionRow['id'] ?? 0),
+                'label' => trim((string)($sectionRow['year_grade'] ?? '') . ' - ' . (string)($sectionRow['name'] ?? '')),
+            ];
+        }
+    }
+}
+
 if ($hasStudents) {
     $result = $mysqli->query("SELECT COUNT(*) as count FROM students WHERE status = 'active'");
     $stats['total_students'] = (int) ($result->fetch_assoc()['count'] ?? 0);
@@ -205,10 +224,6 @@ if ($hasAttendance) {
     }
 }
 
-$chart_labels = json_encode($dates);
-$chart_present = json_encode($present_data);
-$chart_late = json_encode($late_data);
-$chart_absent = json_encode($absent_data);
 ?>
 
 <div class="alert alert-info mb-3">
@@ -279,24 +294,46 @@ $chart_absent = json_encode($absent_data);
 
 <!-- Charts Row -->
 <div class="row mb-4">
-    <div class="col-lg-8">
+    <div class="col-12">
         <div class="card">
-            <div class="card-header">
-                <h5 class="mb-0"><i class="bi bi-graph-up"></i> Last 30 Days Attendance</h5>
+            <div class="card-header d-flex flex-wrap justify-content-between align-items-center gap-2">
+                <h5 class="mb-0"><i class="bi bi-graph-up"></i> Attendance Analytics</h5>
+                <div class="d-flex flex-wrap gap-2">
+                    <?php if (!empty($analyticsSectionOptions)): ?>
+                        <select id="attendanceAnalyticsSection" class="form-select form-select-sm" style="min-width: 210px;">
+                            <option value="">All Sections</option>
+                            <?php foreach ($analyticsSectionOptions as $sectionOption): ?>
+                                <option value="<?php echo (int)$sectionOption['id']; ?>"><?php echo htmlspecialchars((string)$sectionOption['label']); ?></option>
+                            <?php endforeach; ?>
+                        </select>
+                    <?php endif; ?>
+                </div>
             </div>
             <div class="card-body">
-                <canvas id="attendanceChart"></canvas>
-            </div>
-        </div>
-    </div>
-
-    <div class="col-lg-4">
-        <div class="card">
-            <div class="card-header">
-                <h5 class="mb-0"><i class="bi bi-pie-chart"></i> Today's Distribution</h5>
-            </div>
-            <div class="card-body">
-                <canvas id="distributionChart"></canvas>
+                <div id="attendanceAnalyticsLoading" class="text-muted small mb-2" style="display:none;">
+                    Loading attendance analytics...
+                </div>
+                <div id="attendanceAnalyticsEmpty" class="alert alert-light border small" style="display:none;">
+                    No attendance data for selected filter.
+                </div>
+                <div class="row g-3">
+                    <div class="col-lg-6">
+                        <h6 class="mb-2">Daily</h6>
+                        <canvas id="attendanceChartDaily"></canvas>
+                    </div>
+                    <div class="col-lg-6">
+                        <h6 class="mb-2">Weekly</h6>
+                        <canvas id="attendanceChartWeekly"></canvas>
+                    </div>
+                    <div class="col-lg-6">
+                        <h6 class="mb-2">Monthly</h6>
+                        <canvas id="attendanceChartMonthly"></canvas>
+                    </div>
+                    <div class="col-lg-6">
+                        <h6 class="mb-2">Semester</h6>
+                        <canvas id="attendanceChartSemester"></canvas>
+                    </div>
+                </div>
             </div>
         </div>
     </div>
@@ -455,92 +492,148 @@ $chart_absent = json_encode($absent_data);
 </style>
 
 <script>
-// Attendance Chart (Last 30 days)
-const ctx = document.getElementById('attendanceChart').getContext('2d');
-new Chart(ctx, {
-    type: 'line',
-    data: {
-        labels: <?php echo $chart_labels; ?>,
-        datasets: [{
-                label: 'Present',
-                data: <?php echo $chart_present; ?>,
-                borderColor: '#000000',
-                backgroundColor: 'rgba(0, 0, 0, 0.08)',
-                borderWidth: 2,
-                tension: 0.4,
-                fill: true
-            },
-            {
-                label: 'Late',
-                data: <?php echo $chart_late; ?>,
-                borderColor: '#ff0000',
-                backgroundColor: 'rgba(255, 0, 0, 0.08)',
-                borderWidth: 2,
-                tension: 0.4,
-                fill: true
-            },
-            {
-                label: 'Absent',
-                data: <?php echo $chart_absent; ?>,
-                borderColor: '#000000',
-                backgroundColor: 'rgba(255, 255, 255, 0.85)',
-                borderDash: [6, 4],
-                borderWidth: 2,
-                tension: 0.4,
-                fill: true
-            }
-        ]
-    },
-    options: {
-        responsive: true,
-        maintainAspectRatio: true,
-        plugins: {
-            legend: {
-                position: 'bottom',
-                labels: {
-                    usePointStyle: true,
-                    padding: 20
-                }
-            }
-        },
-        scales: {
-            y: {
-                beginAtZero: true,
-                ticks: {
-                    stepSize: 5
-                }
-            }
-        }
+// Attendance analytics charts (API-driven)
+function createAttendanceLineChart(canvasId) {
+    const canvas = document.getElementById(canvasId);
+    if (!canvas) {
+        return null;
     }
-});
 
-// Distribution Chart (Today's pie chart)
-const ctx2 = document.getElementById('distributionChart').getContext('2d');
-new Chart(ctx2, {
-    type: 'doughnut',
-    data: {
-        labels: ['Present', 'Late', 'Absent'],
-        datasets: [{
-            data: [<?php echo $stats['present'] . ', ' . $stats['late'] . ', ' . $stats['absent']; ?>],
-            backgroundColor: ['#000000', '#ff0000', '#ffffff'],
-            borderColor: '#000000',
-            borderWidth: 2
-        }]
-    },
-    options: {
-        responsive: true,
-        maintainAspectRatio: true,
-        plugins: {
-            legend: {
-                position: 'bottom',
-                labels: {
-                    usePointStyle: true,
-                    padding: 20
+    return new Chart(canvas.getContext('2d'), {
+        type: 'line',
+        data: {
+            labels: [],
+            datasets: [{
+                    label: 'Present',
+                    data: [],
+                    borderColor: '#000000',
+                    backgroundColor: 'rgba(0, 0, 0, 0.08)',
+                    borderWidth: 2,
+                    tension: 0.4,
+                    fill: true
+                },
+                {
+                    label: 'Late',
+                    data: [],
+                    borderColor: '#ff0000',
+                    backgroundColor: 'rgba(255, 0, 0, 0.08)',
+                    borderWidth: 2,
+                    tension: 0.4,
+                    fill: true
+                },
+                {
+                    label: 'Absent',
+                    data: [],
+                    borderColor: '#000000',
+                    backgroundColor: 'rgba(255, 255, 255, 0.85)',
+                    borderDash: [6, 4],
+                    borderWidth: 2,
+                    tension: 0.4,
+                    fill: true
+                }
+            ]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: true,
+            plugins: {
+                legend: {
+                    position: 'bottom',
+                    labels: {
+                        usePointStyle: true,
+                        padding: 12
+                    }
+                }
+            },
+            scales: {
+                y: {
+                    beginAtZero: true,
+                    ticks: {
+                        stepSize: 5
+                    }
                 }
             }
         }
+    });
+}
+
+const attendanceCharts = {
+    daily: createAttendanceLineChart('attendanceChartDaily'),
+    weekly: createAttendanceLineChart('attendanceChartWeekly'),
+    monthly: createAttendanceLineChart('attendanceChartMonthly'),
+    semester: createAttendanceLineChart('attendanceChartSemester')
+};
+
+const analyticsSectionSelect = document.getElementById('attendanceAnalyticsSection');
+const analyticsLoading = document.getElementById('attendanceAnalyticsLoading');
+const analyticsEmpty = document.getElementById('attendanceAnalyticsEmpty');
+
+function updateAttendanceChartsFromApi() {
+    const params = new URLSearchParams();
+    if (analyticsSectionSelect && analyticsSectionSelect.value) {
+        params.set('section_id', analyticsSectionSelect.value);
     }
-});
+
+    if (analyticsLoading) {
+        analyticsLoading.style.display = 'block';
+    }
+    if (analyticsEmpty) {
+        analyticsEmpty.style.display = 'none';
+    }
+
+    const analyticsTypes = ['daily', 'weekly', 'monthly', 'semester'];
+    const requests = analyticsTypes.map((type) => {
+        const typeParams = new URLSearchParams(params.toString());
+        typeParams.set('type', type);
+        return fetch('../api/dashboard-attendance.php?' + typeParams.toString())
+            .then(response => response.json())
+            .then(data => ({ type, data }))
+            .catch(() => ({ type, data: { labels: [], present: [], late: [], absent: [] } }));
+    });
+
+    Promise.all(requests)
+        .then(results => {
+            let hasAnyData = false;
+
+            results.forEach(({ type, data }) => {
+                const chart = attendanceCharts[type];
+                if (!chart) {
+                    return;
+                }
+
+                const labels = Array.isArray(data.labels) ? data.labels : [];
+                const present = Array.isArray(data.present) ? data.present : [];
+                const late = Array.isArray(data.late) ? data.late : [];
+                const absent = Array.isArray(data.absent) ? data.absent : [];
+                const allZeros = [...present, ...late, ...absent].every(v => Number(v || 0) === 0);
+
+                if (labels.length > 0 && !allZeros) {
+                    hasAnyData = true;
+                }
+
+                chart.data.labels = labels;
+                chart.data.datasets[0].data = present;
+                chart.data.datasets[1].data = late;
+                chart.data.datasets[2].data = absent;
+                chart.update();
+            });
+
+            if (analyticsEmpty) {
+                analyticsEmpty.style.display = hasAnyData ? 'none' : 'block';
+            }
+        })
+        .finally(() => {
+            if (analyticsLoading) {
+                analyticsLoading.style.display = 'none';
+            }
+        });
+}
+
+if (analyticsSectionSelect) {
+    analyticsSectionSelect.addEventListener('change', updateAttendanceChartsFromApi);
+}
+
+updateAttendanceChartsFromApi();
 
 // Auto-refresh recent scans every 5 seconds
 setInterval(function() {

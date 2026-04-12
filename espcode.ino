@@ -10,6 +10,10 @@
 
 #define WIFI_SSID "Redmi Note 13"
 #define WIFI_PASSWORD "aaaaaaaa"
+// Update this to your PHP server IP.
+const char* SERVER_HOST = "10.86.231.94";
+
+
 #define WIFI_TIMEOUT 20000
 #define WIFI_RECONNECT_INTERVAL 30000
 #define SENSOR_RETRY_INTERVAL 5000
@@ -26,14 +30,17 @@
 #define SENSOR_TX_PIN D2
 #define SENSOR_BAUD_RATE 57600
 
+#define GREEN_LED_PIN D5
+#define RED_LED_PIN D6
+#define BUZZER_PIN D7
+
 #define LCD_I2C_ADDRESS 0x27
 #define LCD_COLS 16
 #define LCD_ROWS 2
 #define I2C_SDA_PIN D3
 #define I2C_SCL_PIN D4
 
-// Update this to your PHP server IP.
-const char* SERVER_HOST = "10.224.246.94";
+
 
 const uint16_t SERVER_PORT = 80;
 const int DEVICE_ID = 1;
@@ -66,6 +73,110 @@ bool serverReady = false;
 bool bootReady = false;
 String currentMode = "IDLE";
 String lastEnrollFailureReason = "";
+
+enum FeedbackMode {
+  FEEDBACK_IDLE,
+  FEEDBACK_WAITING,
+  FEEDBACK_SUCCESS,
+  FEEDBACK_ERROR
+};
+
+FeedbackMode feedbackMode = FEEDBACK_IDLE;
+bool feedbackWaitingGreenPhase = true;
+unsigned long feedbackLastToggleMs = 0;
+unsigned long feedbackPulseUntilMs = 0;
+
+void setFeedbackOutputs(bool greenOn, bool redOn) {
+  digitalWrite(GREEN_LED_PIN, greenOn ? HIGH : LOW);
+  digitalWrite(RED_LED_PIN, redOn ? HIGH : LOW);
+}
+
+void stopFeedbackTone() {
+  noTone(BUZZER_PIN);
+  digitalWrite(BUZZER_PIN, LOW);
+}
+
+void playFeedbackTone(uint16_t frequency, uint16_t durationMs) {
+  tone(BUZZER_PIN, frequency, durationMs);
+  feedbackPulseUntilMs = millis() + durationMs;
+}
+
+void setFeedbackMode(FeedbackMode mode) {
+  feedbackMode = mode;
+
+  if (mode == FEEDBACK_WAITING) {
+    feedbackLastToggleMs = 0;
+    feedbackWaitingGreenPhase = true;
+    setFeedbackOutputs(true, false);
+    stopFeedbackTone();
+    return;
+  }
+
+  if (mode == FEEDBACK_SUCCESS) {
+    setFeedbackOutputs(true, false);
+    playFeedbackTone(2400, 90);
+    return;
+  }
+
+  if (mode == FEEDBACK_ERROR) {
+    setFeedbackOutputs(false, true);
+    playFeedbackTone(1200, 180);
+    return;
+  }
+
+  setFeedbackOutputs(false, false);
+  stopFeedbackTone();
+}
+
+void syncFeedbackFromDisplay(const String& line1, const String& line2) {
+  String text = (line1 + " " + line2);
+  text.toLowerCase();
+
+  if (text.indexOf("booting") >= 0 || text.indexOf("wifi connecting") >= 0 || text.indexOf("wifi failed") >= 0) {
+    setFeedbackMode(FEEDBACK_IDLE);
+    return;
+  }
+
+  if (text.indexOf("try again") >= 0 || text.indexOf("not found") >= 0 || text.indexOf("failed") >= 0 || text.indexOf("offline") >= 0 || text.indexOf("error") >= 0 || text.indexOf("duplicate") >= 0 || text.indexOf("not enrolled") >= 0 || text.indexOf("read error") >= 0) {
+    setFeedbackMode(FEEDBACK_ERROR);
+    return;
+  }
+
+  if (text.indexOf("wait finger") >= 0 || text.indexOf("scanning f") >= 0 || text.indexOf("scan finger") >= 0) {
+    setFeedbackMode(FEEDBACK_WAITING);
+    return;
+  }
+
+  if (text.indexOf("saved") >= 0 || text.indexOf("done") >= 0 || text.indexOf("welcome") >= 0) {
+    setFeedbackMode(FEEDBACK_SUCCESS);
+    return;
+  }
+
+  setFeedbackMode(FEEDBACK_IDLE);
+}
+
+void updateFeedback() {
+  if (feedbackMode == FEEDBACK_WAITING) {
+    if (millis() - feedbackLastToggleMs >= 300) {
+      feedbackLastToggleMs = millis();
+      feedbackWaitingGreenPhase = !feedbackWaitingGreenPhase;
+      setFeedbackOutputs(feedbackWaitingGreenPhase, !feedbackWaitingGreenPhase);
+    }
+    return;
+  }
+
+  if ((feedbackMode == FEEDBACK_SUCCESS || feedbackMode == FEEDBACK_ERROR) && feedbackPulseUntilMs > 0 && millis() >= feedbackPulseUntilMs) {
+    feedbackPulseUntilMs = 0;
+    setFeedbackMode(FEEDBACK_IDLE);
+  }
+}
+
+void initFeedbackHardware() {
+  pinMode(GREEN_LED_PIN, OUTPUT);
+  pinMode(RED_LED_PIN, OUTPUT);
+  pinMode(BUZZER_PIN, OUTPUT);
+  setFeedbackMode(FEEDBACK_IDLE);
+}
 
 void logInfo(const String& tag, const String& message) {
   Serial.print("[");
@@ -203,6 +314,7 @@ void displayLCD(const String& message) {
   lcd.clear();
   lcd.setCursor(0, 0);
   lcd.print(line1);
+  syncFeedbackFromDisplay(line1, "");
 }
 
 void displayLCD(const String& line1, const String& line2) {
@@ -228,6 +340,7 @@ void displayLCD(const String& line1, const String& line2) {
   lcd.print(l1);
   lcd.setCursor(0, 1);
   lcd.print(l2);
+  syncFeedbackFromDisplay(l1, l2);
 }
 
 bool connectWiFi() {
@@ -467,6 +580,7 @@ bool waitFingerRemoved(unsigned long timeoutMs) {
     if (finger.getImage() == FINGERPRINT_NOFINGER) {
       return true;
     }
+    updateFeedback();
     delay(20);
     yield();
   }
@@ -499,63 +613,68 @@ bool enrollFinger(int sensorId, int fingerIndex, int studentId) {
   uint8_t p;
   unsigned long start;
 
-  // Report scan step 1 to server before starting
-  reportScanProgress(studentId, fingerIndex, 1, ENROLL_SCAN_STEPS);
+  while (true) {
+    // Report scan step 1 to server before starting
+    reportScanProgress(studentId, fingerIndex, 1, ENROLL_SCAN_STEPS);
 
-  // Step 1: getImage() + image2Tz(1)
-  showEnrollStep(fingerIndex, 1, "");
-  start = millis();
-  int step1TransientErrors = 0;
-  do {
-    p = finger.getImage();
-    if (p == FINGERPRINT_OK) {
-      break;
-    }
-    if (p != FINGERPRINT_NOFINGER && !isTransientGetImageError(p)) {
-      Serial.print("[ENROLL] getImage #1 failed: ");
-      Serial.println(p);
-      lastEnrollFailureReason = "getImage#1 code=" + String((int)p);
+    // Step 1: getImage() + image2Tz(1)
+    showEnrollStep(fingerIndex, 1, "");
+    start = millis();
+    int step1TransientErrors = 0;
+    do {
+      p = finger.getImage();
+      if (p == FINGERPRINT_OK) {
+        break;
+      }
+      if (p != FINGERPRINT_NOFINGER && !isTransientGetImageError(p)) {
+        Serial.print("[ENROLL] getImage #1 failed: ");
+        Serial.println(p);
+        lastEnrollFailureReason = "getImage#1 code=" + String((int)p);
+        displayLCD("Not Found", "Try Again");
+        return false;
+      }
+      if (p != FINGERPRINT_NOFINGER) {
+        step1TransientErrors++;
+        if (step1TransientErrors <= 3 || step1TransientErrors % 10 == 0) {
+          Serial.print("[ENROLL] getImage #1 transient: ");
+          Serial.println(p);
+        }
+      }
+      updateFeedback();
+      delay(20);
+      yield();
+    } while (millis() - start < ENROLL_CAPTURE_TIMEOUT_MS);
+
+    if (p != FINGERPRINT_OK) {
+      Serial.println("[ENROLL] getImage #1 timeout");
+      lastEnrollFailureReason = "getImage#1 timeout";
       displayLCD("Not Found", "Try Again");
       return false;
     }
-    if (p != FINGERPRINT_NOFINGER) {
-      step1TransientErrors++;
-      if (step1TransientErrors <= 3 || step1TransientErrors % 10 == 0) {
-        Serial.print("[ENROLL] getImage #1 transient: ");
-        Serial.println(p);
-      }
-    }
-    delay(20);
-    yield();
-  } while (millis() - start < ENROLL_CAPTURE_TIMEOUT_MS);
 
-  if (p != FINGERPRINT_OK) {
-    Serial.println("[ENROLL] getImage #1 timeout");
-    lastEnrollFailureReason = "getImage#1 timeout";
-    displayLCD("Not Found", "Try Again");
-    return false;
-  }
-
-  p = finger.image2Tz(1);
-  if (p != FINGERPRINT_OK) {
-    Serial.print("[ENROLL] image2Tz(1) failed: ");
-    Serial.println(p);
-    lastEnrollFailureReason = "image2Tz#1 code=" + String((int)p);
-    displayLCD("Not Found", "Try Again");
-    return false;
-  }
-
-  // For finger 2+, reject a finger that is already enrolled in sensor memory.
-  // This prevents using the same physical finger for multiple finger slots.
-  if (fingerIndex > 1) {
-    p = finger.fingerFastSearch();
-    if (p == FINGERPRINT_OK) {
-      lastEnrollFailureReason = "duplicate finger detected sensor_id=" + String((int)finger.fingerID);
-      Serial.print("[ENROLL] Duplicate finger detected at sensor_id=");
-      Serial.println(finger.fingerID);
-      displayLCD("Duplicate finger", "Use other finger");
+    p = finger.image2Tz(1);
+    if (p != FINGERPRINT_OK) {
+      Serial.print("[ENROLL] image2Tz(1) failed: ");
+      Serial.println(p);
+      lastEnrollFailureReason = "image2Tz#1 code=" + String((int)p);
+      displayLCD("Not Found", "Try Again");
       return false;
     }
+
+    // For finger 2+, reject a finger that is already enrolled in sensor memory.
+    // Instead of failing the enrollment, keep waiting so the user can try another finger.
+    if (fingerIndex > 1) {
+      p = finger.fingerFastSearch();
+      if (p == FINGERPRINT_OK) {
+        Serial.print("[ENROLL] Duplicate finger detected at sensor_id=");
+        Serial.println(finger.fingerID);
+        displayLCD("Use other finger", "Try again");
+        waitFingerRemoved(ENROLL_REMOVE_TIMEOUT_MS);
+        continue;
+      }
+    }
+
+    break;
   }
 
   // Wait for finger removal.
@@ -566,6 +685,7 @@ bool enrollFinger(int sensorId, int fingerIndex, int studentId) {
     if (p == FINGERPRINT_NOFINGER) {
       break;
     }
+      updateFeedback();
     delay(20);
     yield();
   }
@@ -604,6 +724,7 @@ bool enrollFinger(int sensorId, int fingerIndex, int studentId) {
         Serial.println(p);
       }
     }
+      updateFeedback();
     delay(20);
     yield();
   } while (millis() - start < ENROLL_CAPTURE_TIMEOUT_MS);
@@ -630,6 +751,7 @@ bool enrollFinger(int sensorId, int fingerIndex, int studentId) {
   // Keep step 3 visible briefly so web polling can render "3 of 3" before finalize.
   unsigned long step3HoldStart = millis();
   while (millis() - step3HoldStart < 900) {
+    updateFeedback();
     delay(20);
     yield();
   }
@@ -777,13 +899,15 @@ bool reportScanProgress(int studentId, int fingerIndex, int scanStep, int totalS
   if (!httpPostJson(String(API_BASE_PATH) + "/scan-progress.php", payload, body)) {
     Serial.println("[ENROLL] POST scan-progress failed");
     return false;
+
   }
 
   return true;
 }
 
-bool sendDeleteResult(int sensorId, bool success, const String& errorMessage) {
+bool sendDeleteResult(int studentId, int sensorId, bool success, const String& errorMessage) {
   StaticJsonDocument<192> doc;
+  doc["student_id"] = studentId;
   doc["sensor_id"] = sensorId;
   doc["success"] = success;
   if (!success && errorMessage.length() > 0) {
@@ -856,15 +980,17 @@ bool sendAttendance(int sensorId) {
     const char* msg = resp["message"] | "Attendance err";
     Serial.print("[ATTEND] API error: ");
     Serial.println(msg);
-    displayLCD("Not Found", "Try Again");
+    if (String(msg) == "Not enrolled") {
+      displayLCD("Not enrolled", "Try Again");
+    } else {
+      displayLCD("Not Found", "Try Again");
+    }
     return false;
   }
 
-  const char* msg = resp["message"] | "Attendance OK";
   const char* type = resp["type"] | "";
   const char* studentName = resp["student_name"] | "John";
-
-  String welcome = "Welcome " + String(studentName);
+  bool duplicateScan = resp["duplicate"] | false;
 
   String timeValue = "";
   if (resp.containsKey("time")) {
@@ -881,20 +1007,30 @@ bool sendAttendance(int sensorId) {
     timeValue = timeValue.substring(0, 8);
   }
 
-  String timeLine = "Time ";
-  if (String(type) == "IN") {
-    timeLine += "IN:";
-  } else {
-    timeLine += "OUT:";
-  }
-  timeLine += timeValue;
+  String actionText = String(type) == "IN" ? "Time IN" : "Time OUT";
+  String displayLine1 = actionText + " " + timeValue;
+  String displayLine2 = String(studentName);
+  String serialActionText = String(type) == "IN" ? "Time in" : "Time out";
 
   Serial.print("[ATTEND] ");
-  Serial.print(msg);
-  Serial.print(" ");
-  Serial.println(type);
+  if (duplicateScan) {
+    Serial.print("Already ");
+    Serial.print(serialActionText);
+    Serial.print(" [");
+    Serial.print(timeValue);
+    Serial.print("] ");
+    Serial.println(studentName);
+    displayLine1 = String("Already ") + (String(type) == "IN" ? "time in" : "time out");
+    displayLine2 = String(studentName);
+  } else {
+    Serial.print(serialActionText);
+    Serial.print(" [");
+    Serial.print(timeValue);
+    Serial.print("] ");
+    Serial.println(studentName);
+  }
 
-  displayLCD(welcome, timeLine);
+  displayLCD(displayLine1, displayLine2);
   return true;
 }
 
@@ -917,6 +1053,7 @@ void setup() {
   Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
   lcd.init();
   lcd.backlight();
+  initFeedbackHardware();
   displayLCD("Booting...", "Step1: WiFi");
 
   // Force immediate first attempts in loop() boot sequence.
@@ -926,6 +1063,8 @@ void setup() {
 }
 
 void loop() {
+  updateFeedback();
+
   if (!bootReady) {
     if (WiFi.status() != WL_CONNECTED) {
       displayLCD("Booting...", "Step1: WiFi");
@@ -1042,7 +1181,7 @@ void loop() {
   if (cmd.valid && currentMode == "DELETE") {
     if (cmd.sensorId <= 0) {
       logInfo("DELETE", "Missing sensor_id in delete command");
-      sendDeleteResult(0, false, "Missing sensor_id");
+      sendDeleteResult(cmd.studentId, 0, false, "Missing sensor_id");
       return;
     }
 
@@ -1052,7 +1191,7 @@ void loop() {
 
     String deleteError = "";
     bool deleted = deleteFingerprintModel(cmd.sensorId, deleteError);
-    bool posted = sendDeleteResult(cmd.sensorId, deleted, deleteError);
+    bool posted = sendDeleteResult(cmd.studentId, cmd.sensorId, deleted, deleteError);
 
     if (deleted && posted) {
       displayLCD("Delete done", "ID:" + String(cmd.sensorId));
@@ -1069,6 +1208,7 @@ void loop() {
       logInfo("MODE", "Registration mode, waiting for finger scan command...");
     }
     displayLCD("Reg mode", "Wait finger...");
+    updateFeedback();
     return;
   }
 
@@ -1089,6 +1229,7 @@ void loop() {
     }
   }
   displayLCD("Scan Finger");
+  updateFeedback();
 
   if (millis() - lastIdleScanMs < 150) {
     return;
@@ -1136,7 +1277,6 @@ void loop() {
   Serial.println(matchedId);
   if (sendAttendance(matchedId)) {
     lastAttendanceCompleteMs = millis();
-    // Avoid duplicate reads while the finger is still on the sensor.
     waitFingerRemoved(4000);
   }
 }

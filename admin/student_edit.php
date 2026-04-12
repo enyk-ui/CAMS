@@ -6,6 +6,7 @@
 
 session_start();
 require_once '../config/db.php';
+require_once '../helpers/SchoolYearHelper.php';
 require '../includes/header.php';
 
 function studentColumnExists(mysqli $mysqli, string $columnName): bool
@@ -13,6 +14,100 @@ function studentColumnExists(mysqli $mysqli, string $columnName): bool
     $safeColumn = $mysqli->real_escape_string($columnName);
     $result = $mysqli->query("SHOW COLUMNS FROM students LIKE '{$safeColumn}'");
     return $result && $result->num_rows > 0;
+}
+
+function usersColumnExists(mysqli $mysqli, string $columnName): bool
+{
+    $safeColumn = $mysqli->real_escape_string($columnName);
+    $result = $mysqli->query("SHOW COLUMNS FROM users LIKE '{$safeColumn}'");
+    return $result && $result->num_rows > 0;
+}
+
+function ensureUsersAssignmentColumns(mysqli $mysqli): void
+{
+    $usersTable = $mysqli->query("SHOW TABLES LIKE 'users'");
+    if (!$usersTable || $usersTable->num_rows === 0) {
+        return;
+    }
+
+    if (!usersColumnExists($mysqli, 'year_level')) {
+        $mysqli->query("ALTER TABLE users ADD COLUMN year_level TINYINT UNSIGNED DEFAULT NULL");
+    }
+
+    if (!usersColumnExists($mysqli, 'school_year_label')) {
+        $mysqli->query("ALTER TABLE users ADD COLUMN school_year_label VARCHAR(20) DEFAULT NULL");
+    }
+
+    if (!usersColumnExists($mysqli, 'section')) {
+        $mysqli->query("ALTER TABLE users ADD COLUMN section VARCHAR(50) DEFAULT NULL");
+    }
+}
+
+function buildTeacherSectionMap(mysqli $mysqli, string $activeSchoolYearLabel): array
+{
+    $map = [];
+    $usersTable = $mysqli->query("SHOW TABLES LIKE 'users'");
+    if (!$usersTable || $usersTable->num_rows === 0) {
+        return $map;
+    }
+
+    if (!usersColumnExists($mysqli, 'year_level') || !usersColumnExists($mysqli, 'section')) {
+        return $map;
+    }
+
+    $hasSchoolYearLabel = usersColumnExists($mysqli, 'school_year_label');
+
+    $sql = "SELECT year_level, section, full_name FROM users WHERE role = 'teacher' AND status = 'active' AND year_level IS NOT NULL AND section IS NOT NULL AND TRIM(section) <> ''";
+    $types = '';
+    $params = [];
+
+    if ($hasSchoolYearLabel && $activeSchoolYearLabel !== '') {
+        $sql .= " AND (school_year_label = ? OR school_year_label IS NULL OR school_year_label = '')";
+        $types .= 's';
+        $params[] = $activeSchoolYearLabel;
+    }
+
+    $sql .= " ORDER BY year_level ASC, section ASC, full_name ASC";
+    $stmt = $mysqli->prepare($sql);
+    if (!$stmt) {
+        return $map;
+    }
+
+    if ($types !== '') {
+        $stmt->bind_param($types, ...$params);
+    }
+
+    $stmt->execute();
+    $result = $stmt->get_result();
+    while ($row = $result->fetch_assoc()) {
+        $year = (string)((int)($row['year_level'] ?? 0));
+        $section = trim((string)($row['section'] ?? ''));
+        $teacherName = trim((string)($row['full_name'] ?? 'Unassigned'));
+        if ($year === '0' || $section === '') {
+            continue;
+        }
+
+        if (!isset($map[$year])) {
+            $map[$year] = [];
+        }
+
+        $duplicate = false;
+        foreach ($map[$year] as $entry) {
+            if (($entry['section'] ?? '') === $section) {
+                $duplicate = true;
+                break;
+            }
+        }
+
+        if (!$duplicate) {
+            $map[$year][] = [
+                'section' => $section,
+                'teacher' => $teacherName,
+            ];
+        }
+    }
+
+    return $map;
 }
 
 function formatStudentDisplayName(array $student): string
@@ -57,96 +152,86 @@ if (!$student) {
 
 $message = '';
 $message_type = 'success';
+SchoolYearHelper::ensureSchoolYearSupport($mysqli);
+$activeSchoolYear = SchoolYearHelper::getEffectiveSchoolYearRange($mysqli);
+$activeSchoolYearLabel = (string)($activeSchoolYear['label'] ?? '');
+ensureUsersAssignmentColumns($mysqli);
+$teacherSectionMap = buildTeacherSectionMap($mysqli, $activeSchoolYearLabel);
 $hasMiddleInitialColumn = studentColumnExists($mysqli, 'middle_initial');
 $hasExtensionColumn = studentColumnExists($mysqli, 'extension');
 $hasUpdatedAtColumn = studentColumnExists($mysqli, 'updated_at');
 
 // Handle form submission
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    $student_id_input = trim($_POST['student_id']);
     $first_name = trim($_POST['first_name']);
     $middle_initial = trim($_POST['middle_initial'] ?? '');
     $extension = trim($_POST['extension'] ?? '');
     $last_name = trim($_POST['last_name']);
-    $email = trim($_POST['email']);
     $year = intval($_POST['year']);
     $section = trim($_POST['section']);
     $status = $_POST['status'];
 
     // Validate required fields
-    if (empty($student_id_input) || empty($first_name) || empty($last_name) || empty($email) || empty($section)) {
+    if (empty($first_name) || empty($last_name) || empty($section)) {
         $message = 'Please fill in all required fields.';
         $message_type = 'danger';
     } else {
-        // Check if student ID is unique (excluding current student)
-        $stmt = $mysqli->prepare("SELECT id FROM students WHERE student_id = ? AND id != ?");
-        $stmt->bind_param("si", $student_id_input, $student_id);
-        $stmt->execute();
-        $existing = $stmt->get_result()->fetch_assoc();
+        // Build update query based on available columns in current schema.
+        $setClauses = [
+            'first_name = ?',
+            'last_name = ?',
+            'year = ?',
+            'section = ?',
+            'status = ?'
+        ];
+        $types = 'ssiss';
+        $params = [$first_name, $last_name, $year, $section, $status];
 
-        if ($existing) {
-            $message = 'Student ID already exists. Please use a unique ID.';
-            $message_type = 'danger';
-        } else {
-            // Build update query based on available columns in current schema.
-            $setClauses = [
-                'student_id = ?',
-                'first_name = ?',
-                'last_name = ?',
-                'email = ?',
-                'year = ?',
-                'section = ?',
-                'status = ?'
-            ];
-            $types = 'ssssiss';
-            $params = [$student_id_input, $first_name, $last_name, $email, $year, $section, $status];
+        if ($hasMiddleInitialColumn) {
+            array_splice($setClauses, 1, 0, 'middle_initial = ?');
+            $types = 'sssiss';
+            $params = [$first_name, $middle_initial, $last_name, $year, $section, $status];
+        }
 
+        if ($hasExtensionColumn) {
+            $insertIndex = $hasMiddleInitialColumn ? 3 : 2;
+            array_splice($setClauses, $insertIndex, 0, 'extension = ?');
             if ($hasMiddleInitialColumn) {
-                array_splice($setClauses, 2, 0, 'middle_initial = ?');
-                $types = 'sssssiss';
-                $params = [$student_id_input, $first_name, $middle_initial, $last_name, $email, $year, $section, $status];
-            }
-
-            if ($hasExtensionColumn) {
-                $insertIndex = $hasMiddleInitialColumn ? 4 : 3;
-                array_splice($setClauses, $insertIndex, 0, 'extension = ?');
-                if ($hasMiddleInitialColumn) {
-                    $types = 'ssssssiss';
-                    $params = [$student_id_input, $first_name, $middle_initial, $last_name, $extension, $email, $year, $section, $status];
-                } else {
-                    $types = 'sssssiss';
-                    $params = [$student_id_input, $first_name, $last_name, $extension, $email, $year, $section, $status];
-                }
-            }
-
-            if ($hasUpdatedAtColumn) {
-                $setClauses[] = 'updated_at = NOW()';
-            }
-
-            $sql = 'UPDATE students SET ' . implode(', ', $setClauses) . ' WHERE id = ?';
-            $stmt = $mysqli->prepare($sql);
-            $types .= 'i';
-            $params[] = $student_id;
-            $bindParams = [$types];
-            foreach ($params as $index => $value) {
-                $bindParams[] = &$params[$index];
-            }
-            call_user_func_array([$stmt, 'bind_param'], $bindParams);
-            
-            if ($stmt->execute()) {
-                $message = 'Student information updated successfully!';
-                $message_type = 'success';
-                
-                // Refresh student data
-                $stmt = $mysqli->prepare("SELECT * FROM students WHERE id = ?");
-                $stmt->bind_param("i", $student_id);
-                $stmt->execute();
-                $result = $stmt->get_result();
-                $student = $result->fetch_assoc();
+                $types = 'ssssiss';
+                $params = [$first_name, $middle_initial, $last_name, $extension, $year, $section, $status];
             } else {
-                $message = 'Error updating student: ' . $mysqli->error;
-                $message_type = 'danger';
+                $types = 'sssiss';
+                $params = [$first_name, $last_name, $extension, $year, $section, $status];
             }
+        }
+
+        if ($hasUpdatedAtColumn) {
+            $setClauses[] = 'updated_at = NOW()';
+        }
+
+        $sql = 'UPDATE students SET ' . implode(', ', $setClauses) . ' WHERE id = ?';
+        $stmt = $mysqli->prepare($sql);
+        $types .= 'i';
+        $params[] = $student_id;
+        $bindParams = [$types];
+        foreach ($params as $index => $value) {
+            $bindParams[] = &$params[$index];
+        }
+        call_user_func_array([$stmt, 'bind_param'], $bindParams);
+        
+        if ($stmt->execute()) {
+            $message = 'Student information updated successfully!';
+            $message_type = 'success';
+            
+            // Refresh student data
+            $stmt = $mysqli->prepare("SELECT * FROM students WHERE id = ?");
+            $stmt->bind_param("i", $student_id);
+            $stmt->execute();
+            $result = $stmt->get_result();
+            $student = $result->fetch_assoc();
+        } else {
+            $message = 'Error updating student: ' . $mysqli->error;
+            $message_type = 'danger';
         }
     }
 }
@@ -173,24 +258,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     <?php endif; ?>
 
                     <form method="POST" class="row g-3">
-                        
-                        <!-- Student ID -->
-                        <div class="col-md-6">
-                            <label for="student_id" class="form-label">Student ID *</label>
-                            <input type="text" class="form-control" id="student_id" name="student_id" 
-                                   value="<?php echo htmlspecialchars($student['student_id']); ?>" 
-                                   placeholder="e.g., 2024-001" required>
-                            <div class="form-text">Unique identifier for the student</div>
-                        </div>
-
-                        <!-- Email -->
-                        <div class="col-md-6">
-                            <label for="email" class="form-label">Email *</label>
-                            <input type="email" class="form-control" id="email" name="email" 
-                                   value="<?php echo htmlspecialchars($student['email']); ?>" 
-                                   placeholder="juan@example.com" required>
-                        </div>
-
                         <!-- First Name -->
                         <div class="col-md-4">
                             <label for="first_name" class="form-label">First Name *</label>
@@ -256,18 +323,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         <div class="col-md-6">
                             <label for="section" class="form-label">Section *</label>
                             <select class="form-select" id="section" name="section" required>
-                                <option value="">Select Section</option>
-                                <?php $sectionOptions = ['Alpha', 'Beta', 'Charlie', 'Delta']; ?>
-                                <?php foreach ($sectionOptions as $sectionOption): ?>
-                                    <option value="<?php echo htmlspecialchars($sectionOption); ?>" <?php echo $student['section'] === $sectionOption ? 'selected' : ''; ?>>
-                                        <?php echo htmlspecialchars($sectionOption); ?>
-                                    </option>
-                                <?php endforeach; ?>
-                                <?php if (!empty($student['section']) && !in_array($student['section'], $sectionOptions, true)): ?>
-                                    <option value="<?php echo htmlspecialchars($student['section']); ?>" selected>
-                                        <?php echo htmlspecialchars($student['section']); ?> (current)
-                                    </option>
-                                <?php endif; ?>
+                                <option value="">Select year first</option>
                             </select>
                         </div>
 
@@ -303,7 +359,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                                     <div id="fingerprintWarning" class="mt-2" style="display: none;">
                                         <div class="alert alert-warning py-2 mb-0">
                                             <i class="bi bi-exclamation-triangle"></i> 
-                                            Please update fingerprints before saving student changes
+                                            Fingerprint update is optional. You can save student changes without updating fingerprints.
                                         </div>
                                     </div>
                                 </div>
@@ -574,6 +630,55 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 </style>
 
 <script>
+const teacherSectionMap = <?php echo json_encode($teacherSectionMap, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES); ?>;
+const currentStudentSection = <?php echo json_encode((string)($student['section'] ?? ''), JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES); ?>;
+
+function populateSectionOptions(yearValue, selectedSection) {
+    const sectionSelect = document.getElementById('section');
+    if (!sectionSelect) {
+        return;
+    }
+
+    sectionSelect.innerHTML = '';
+
+    if (!yearValue) {
+        sectionSelect.add(new Option('Select year first', ''));
+        sectionSelect.value = '';
+        return;
+    }
+
+    const sections = teacherSectionMap[String(yearValue)] || [];
+    if (!sections.length) {
+        sectionSelect.add(new Option('No teacher section for selected year', ''));
+        sectionSelect.value = '';
+        if (selectedSection) {
+            sectionSelect.add(new Option(`${selectedSection} (current)`, selectedSection));
+            sectionSelect.value = selectedSection;
+        }
+        return;
+    }
+
+    sectionSelect.add(new Option('Select section', ''));
+    sections.forEach(entry => {
+        const section = String(entry.section || '').trim();
+        const teacher = String(entry.teacher || '').trim();
+        if (!section) {
+            return;
+        }
+
+        const label = teacher ? `${section} - ${teacher}` : section;
+        sectionSelect.add(new Option(label, section));
+    });
+
+    if (selectedSection) {
+        const exists = Array.from(sectionSelect.options).some(option => option.value === selectedSection);
+        if (!exists) {
+            sectionSelect.add(new Option(`${selectedSection} (current)`, selectedSection));
+        }
+        sectionSelect.value = selectedSection;
+    }
+}
+
 // Fingerprint Modal State and Form Validation
 let updateState = {
     modal: null,
@@ -597,6 +702,14 @@ let updateState = {
 
 // Initialize modal when page loads
 document.addEventListener('DOMContentLoaded', function() {
+    const yearSelect = document.getElementById('year');
+    if (yearSelect) {
+        yearSelect.addEventListener('change', function () {
+            populateSectionOptions(this.value, '');
+        });
+        populateSectionOptions(yearSelect.value || '', currentStudentSection);
+    }
+
     updateState.modal = new bootstrap.Modal(document.getElementById('fingerprintModal'));
     updateModeIndicator('attendance');
     renderScanCircles(1);
@@ -1150,21 +1263,12 @@ function appendDebug(message, data) {
 }
 
 function validateFormSubmission(e) {
-    // Check if fingerprints were changed but not updated
+    // Fingerprint updates are optional; show reminder only.
     if (updateState.fingerprintsChanged && !updateState.enrollmentCompleted) {
-        e.preventDefault();
-        
-        // Show warning
         document.getElementById('fingerprintWarning').style.display = 'block';
         document.getElementById('fingerprintStatus').style.display = 'none';
-        
-        // Scroll to warning
-        document.getElementById('fingerprintWarning').scrollIntoView({ 
-            behavior: 'smooth', 
-            block: 'center' 
-        });
-        
-        // Highlight the fingerprint button
+
+        // Keep visual cue but do not block save.
         const fingerprintBtn = document.getElementById('updateFingerprintsBtn');
         fingerprintBtn.classList.add('btn-warning');
         fingerprintBtn.classList.remove('btn-primary');
@@ -1173,10 +1277,8 @@ function validateFormSubmission(e) {
             fingerprintBtn.classList.remove('btn-warning');
             fingerprintBtn.classList.add('btn-primary');
         }, 3000);
-        
-        return false;
     }
-    
+
     return true;
 }
 

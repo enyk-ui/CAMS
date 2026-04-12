@@ -8,13 +8,86 @@ require_once '../config/db.php';
 require_once '../helpers/SchoolYearHelper.php';
 require '../includes/header.php';
 
+function studentColumnExists(mysqli $mysqli, string $columnName): bool
+{
+    $safeColumn = $mysqli->real_escape_string($columnName);
+    $result = $mysqli->query("SHOW COLUMNS FROM students LIKE '{$safeColumn}'");
+    return $result && $result->num_rows > 0;
+}
+
+function resolveTeacherSectionIds(mysqli $mysqli): array
+{
+    $teacherId = (int)($_SESSION['admin_id'] ?? 0);
+    if ($teacherId <= 0) {
+        return [];
+    }
+
+    $stmt = $mysqli->prepare('SELECT section_id FROM teacher_sections WHERE teacher_id = ? ORDER BY section_id ASC');
+    if (!$stmt) {
+        return [];
+    }
+
+    $stmt->bind_param('i', $teacherId);
+    $stmt->execute();
+    $result = $stmt->get_result();
+    $ids = [];
+    while ($row = $result->fetch_assoc()) {
+        $sid = (int)($row['section_id'] ?? 0);
+        if ($sid > 0) {
+            $ids[] = $sid;
+        }
+    }
+    $stmt->close();
+
+    return $ids;
+}
+
+function buildIntInPlaceholders(array $ids): string
+{
+    return implode(',', array_fill(0, count($ids), '?'));
+}
+
+function bindDynamicParams(mysqli_stmt $stmt, string $types, array &$params): void
+{
+    $bind = [$types];
+    foreach ($params as $index => $value) {
+        $bind[] = &$params[$index];
+    }
+    call_user_func_array([$stmt, 'bind_param'], $bind);
+}
+
 // Verify teacher role
 if ($_SESSION['role'] !== 'teacher') {
     header('Location: ../index.php?error=Unauthorized');
     exit;
 }
 
-$section = $_SESSION['teacher_section'];
+$section = trim((string)($_SESSION['teacher_section'] ?? ''));
+$hasSectionIdColumn = studentColumnExists($mysqli, 'section_id');
+$teacherSectionIds = resolveTeacherSectionIds($mysqli);
+$teacherAnalyticsSections = [];
+if ($hasSectionIdColumn && !empty($teacherSectionIds)) {
+    $inClause = buildIntInPlaceholders($teacherSectionIds);
+    $sectionMetaSql = "SELECT id, year_grade, name FROM sections WHERE id IN ({$inClause}) ORDER BY CAST(year_grade AS UNSIGNED) ASC, name ASC";
+    $sectionMetaStmt = $mysqli->prepare($sectionMetaSql);
+    if ($sectionMetaStmt) {
+        $sectionMetaTypes = str_repeat('i', count($teacherSectionIds));
+        $sectionMetaParams = $teacherSectionIds;
+        bindDynamicParams($sectionMetaStmt, $sectionMetaTypes, $sectionMetaParams);
+        $sectionMetaStmt->execute();
+        $sectionMetaRes = $sectionMetaStmt->get_result();
+        while ($sectionMetaRow = $sectionMetaRes->fetch_assoc()) {
+            $teacherAnalyticsSections[] = [
+                'id' => (int)($sectionMetaRow['id'] ?? 0),
+                'label' => trim((string)($sectionMetaRow['year_grade'] ?? '') . ' - ' . (string)($sectionMetaRow['name'] ?? '')),
+            ];
+        }
+        $sectionMetaStmt->close();
+    }
+}
+$sectionScopeLabel = ($hasSectionIdColumn && !empty($teacherSectionIds))
+    ? 'Assigned Sections'
+    : ($section !== '' ? $section : 'Assigned Sections');
 $today = date('Y-m-d');
 
 SchoolYearHelper::ensureSchoolYearSupport($mysqli);
@@ -33,27 +106,81 @@ if ($reportDate < $schoolYearStart) {
 $stats = [];
 
 // Total students in section
-$result = $mysqli->query("
-    SELECT COUNT(*) as count FROM students
-    WHERE status = 'active' AND section = '$section'
-");
-$stats['total_students'] = $result->fetch_assoc()['count'] ?? 0;
+if ($hasSectionIdColumn && !empty($teacherSectionIds)) {
+    $inClause = buildIntInPlaceholders($teacherSectionIds);
 
-// Today's attendance in section
-$result = $mysqli->query("
-    SELECT
-        COUNT(DISTINCT a.student_id) as present_count,
-        SUM(CASE WHEN a.status = 'late' THEN 1 ELSE 0 END) as late_count,
-        SUM(CASE WHEN a.status = 'absent' THEN 1 ELSE 0 END) as absent_count
-    FROM attendance a
-    INNER JOIN students s ON a.student_id = s.id
-    WHERE a.attendance_date = '$reportDate' AND s.section = '$section'
-");
+    $countSql = "SELECT COUNT(*) AS count FROM students WHERE status = 'active' AND section_id IN ({$inClause})";
+    $countStmt = $mysqli->prepare($countSql);
+    if ($countStmt) {
+        $countTypes = str_repeat('i', count($teacherSectionIds));
+        $countParams = $teacherSectionIds;
+        bindDynamicParams($countStmt, $countTypes, $countParams);
+        $countStmt->execute();
+        $countRow = $countStmt->get_result()->fetch_assoc();
+        $stats['total_students'] = (int)($countRow['count'] ?? 0);
+        $countStmt->close();
+    } else {
+        $stats['total_students'] = 0;
+    }
 
-$row = $result->fetch_assoc();
-$stats['present_today'] = $row['present_count'] ?? 0;
-$stats['late_today'] = $row['late_count'] ?? 0;
-$stats['absent_today'] = $row['absent_count'] ?? 0;
+    $attendanceSql = "
+        SELECT
+            COUNT(DISTINCT a.student_id) AS present_count,
+            SUM(CASE WHEN a.status = 'late' THEN 1 ELSE 0 END) AS late_count,
+            SUM(CASE WHEN a.status = 'absent' THEN 1 ELSE 0 END) AS absent_count
+        FROM attendance a
+        INNER JOIN students s ON a.student_id = s.id
+        WHERE a.attendance_date = ? AND s.section_id IN ({$inClause})
+    ";
+    $attendanceStmt = $mysqli->prepare($attendanceSql);
+    if ($attendanceStmt) {
+        $attendanceTypes = 's' . str_repeat('i', count($teacherSectionIds));
+        $attendanceParams = array_merge([$reportDate], $teacherSectionIds);
+        bindDynamicParams($attendanceStmt, $attendanceTypes, $attendanceParams);
+        $attendanceStmt->execute();
+        $row = $attendanceStmt->get_result()->fetch_assoc() ?: [];
+        $attendanceStmt->close();
+    } else {
+        $row = [];
+    }
+
+    $stats['present_today'] = (int)($row['present_count'] ?? 0);
+    $stats['late_today'] = (int)($row['late_count'] ?? 0);
+    $stats['absent_today'] = (int)($row['absent_count'] ?? 0);
+} else {
+    $countStmt = $mysqli->prepare('SELECT COUNT(*) AS count FROM students WHERE status = ? AND section = ?');
+    if ($countStmt) {
+        $active = 'active';
+        $countStmt->bind_param('ss', $active, $section);
+        $countStmt->execute();
+        $countRow = $countStmt->get_result()->fetch_assoc();
+        $stats['total_students'] = (int)($countRow['count'] ?? 0);
+        $countStmt->close();
+    } else {
+        $stats['total_students'] = 0;
+    }
+
+    $attendanceStmt = $mysqli->prepare(
+        'SELECT COUNT(DISTINCT a.student_id) AS present_count,
+                SUM(CASE WHEN a.status = "late" THEN 1 ELSE 0 END) AS late_count,
+                SUM(CASE WHEN a.status = "absent" THEN 1 ELSE 0 END) AS absent_count
+         FROM attendance a
+         INNER JOIN students s ON a.student_id = s.id
+         WHERE a.attendance_date = ? AND s.section = ?'
+    );
+    if ($attendanceStmt) {
+        $attendanceStmt->bind_param('ss', $reportDate, $section);
+        $attendanceStmt->execute();
+        $row = $attendanceStmt->get_result()->fetch_assoc() ?: [];
+        $attendanceStmt->close();
+    } else {
+        $row = [];
+    }
+
+    $stats['present_today'] = (int)($row['present_count'] ?? 0);
+    $stats['late_today'] = (int)($row['late_count'] ?? 0);
+    $stats['absent_today'] = (int)($row['absent_count'] ?? 0);
+}
 
 // Calculate percentage present
 $stats['attendance_rate'] = $stats['total_students'] > 0
@@ -62,24 +189,54 @@ $stats['attendance_rate'] = $stats['total_students'] > 0
 
 // Recent attendance records
 $recent = [];
-$result = $mysqli->query("
-    SELECT
-        s.student_id,
-        s.first_name,
-        s.last_name,
-        a.status,
-        a.time_in_am,
-        a.attendance_date
-    FROM attendance a
-    INNER JOIN students s ON a.student_id = s.id
-    WHERE s.section = '$section'
-    AND a.attendance_date BETWEEN '$schoolYearStart' AND '$schoolYearEnd'
-    ORDER BY a.attendance_date DESC, a.created_at DESC
-    LIMIT 10
-");
-
-while ($row = $result->fetch_assoc()) {
-    $recent[] = $row;
+if ($hasSectionIdColumn && !empty($teacherSectionIds)) {
+    $inClause = buildIntInPlaceholders($teacherSectionIds);
+    $recentSql = "
+        SELECT
+            s.id AS student_pk,
+            s.first_name,
+            s.last_name,
+            a.status,
+            a.time_in_am,
+            a.attendance_date
+        FROM attendance a
+        INNER JOIN students s ON a.student_id = s.id
+        WHERE s.section_id IN ({$inClause})
+          AND a.attendance_date BETWEEN ? AND ?
+        ORDER BY a.attendance_date DESC, a.created_at DESC
+        LIMIT 10
+    ";
+    $recentStmt = $mysqli->prepare($recentSql);
+    if ($recentStmt) {
+        $recentTypes = str_repeat('i', count($teacherSectionIds)) . 'ss';
+        $recentParams = array_merge($teacherSectionIds, [$schoolYearStart, $schoolYearEnd]);
+        bindDynamicParams($recentStmt, $recentTypes, $recentParams);
+        $recentStmt->execute();
+        $result = $recentStmt->get_result();
+        while ($row = $result->fetch_assoc()) {
+            $recent[] = $row;
+        }
+        $recentStmt->close();
+    }
+} else {
+    $recentStmt = $mysqli->prepare(
+                'SELECT s.id AS student_pk, s.first_name, s.last_name, a.status, a.time_in_am, a.attendance_date
+         FROM attendance a
+         INNER JOIN students s ON a.student_id = s.id
+         WHERE s.section = ?
+           AND a.attendance_date BETWEEN ? AND ?
+         ORDER BY a.attendance_date DESC, a.created_at DESC
+         LIMIT 10'
+    );
+    if ($recentStmt) {
+        $recentStmt->bind_param('sss', $section, $schoolYearStart, $schoolYearEnd);
+        $recentStmt->execute();
+        $result = $recentStmt->get_result();
+        while ($row = $result->fetch_assoc()) {
+            $recent[] = $row;
+        }
+        $recentStmt->close();
+    }
 }
 ?>
 
@@ -89,6 +246,7 @@ while ($row = $result->fetch_assoc()) {
         Active School Year: <strong><?php echo htmlspecialchars($activeSchoolYear['label'] ?? 'N/A'); ?></strong>
         (<?php echo htmlspecialchars($schoolYearStart); ?> to <?php echo htmlspecialchars($schoolYearEnd); ?>)
         | Report date: <strong><?php echo htmlspecialchars($reportDate); ?></strong>
+        | Scope: <strong><?php echo htmlspecialchars($sectionScopeLabel); ?></strong>
     </div>
 
     <!-- Statistics Cards -->
@@ -150,6 +308,52 @@ while ($row = $result->fetch_assoc()) {
         </div>
     </div>
 
+    <div class="row mb-4">
+        <div class="col-12">
+            <div class="card">
+                <div class="card-header d-flex flex-wrap justify-content-between align-items-center gap-2">
+                    <h5 class="mb-0"><i class="bi bi-graph-up"></i> Attendance Analytics</h5>
+                    <div class="d-flex flex-wrap gap-2">
+                        <?php if (count($teacherAnalyticsSections) > 1): ?>
+                            <select id="attendanceAnalyticsSection" class="form-select form-select-sm" style="min-width: 210px;">
+                                <option value="">All Assigned Sections</option>
+                                <?php foreach ($teacherAnalyticsSections as $sectionOption): ?>
+                                    <option value="<?php echo (int)$sectionOption['id']; ?>"><?php echo htmlspecialchars((string)$sectionOption['label']); ?></option>
+                                <?php endforeach; ?>
+                            </select>
+                        <?php endif; ?>
+                    </div>
+                </div>
+                <div class="card-body">
+                    <div id="attendanceAnalyticsLoading" class="text-muted small mb-2" style="display:none;">
+                        Loading attendance analytics...
+                    </div>
+                    <div id="attendanceAnalyticsEmpty" class="alert alert-light border small" style="display:none;">
+                        No attendance data for selected filter.
+                    </div>
+                    <div class="row g-3">
+                        <div class="col-lg-6">
+                            <h6 class="mb-2">Daily</h6>
+                            <canvas id="attendanceChartDaily"></canvas>
+                        </div>
+                        <div class="col-lg-6">
+                            <h6 class="mb-2">Weekly</h6>
+                            <canvas id="attendanceChartWeekly"></canvas>
+                        </div>
+                        <div class="col-lg-6">
+                            <h6 class="mb-2">Monthly</h6>
+                            <canvas id="attendanceChartMonthly"></canvas>
+                        </div>
+                        <div class="col-lg-6">
+                            <h6 class="mb-2">Semester</h6>
+                            <canvas id="attendanceChartSemester"></canvas>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <!-- Recent Attendance -->
     <div class="row">
         <div class="col-12">
@@ -163,7 +367,6 @@ while ($row = $result->fetch_assoc()) {
                             <table class="table table-hover">
                                 <thead>
                                     <tr>
-                                        <th>Student ID</th>
                                         <th>Name</th>
                                         <th>Date</th>
                                         <th>Time In</th>
@@ -173,7 +376,6 @@ while ($row = $result->fetch_assoc()) {
                                 <tbody>
                                     <?php foreach ($recent as $record): ?>
                                         <tr>
-                                            <td><?php echo htmlspecialchars($record['student_id']); ?></td>
                                             <td><?php echo htmlspecialchars($record['first_name'] . ' ' . $record['last_name']); ?></td>
                                             <td><?php echo date('M d, Y', strtotime($record['attendance_date'])); ?></td>
                                             <td><?php echo $record['time_in_am'] ? date('H:i', strtotime($record['time_in_am'])) : '-'; ?></td>
@@ -201,5 +403,142 @@ while ($row = $result->fetch_assoc()) {
         </div>
     </div>
 </div>
+
+<script>
+function createTeacherAnalyticsChart(canvasId) {
+    const canvas = document.getElementById(canvasId);
+    if (!canvas) {
+        return null;
+    }
+
+    return new Chart(canvas.getContext('2d'), {
+        type: 'line',
+        data: {
+            labels: [],
+            datasets: [
+                {
+                    label: 'Present',
+                    data: [],
+                    borderColor: '#10b981',
+                    backgroundColor: 'rgba(16, 185, 129, 0.10)',
+                    borderWidth: 2,
+                    tension: 0.35,
+                    fill: true
+                },
+                {
+                    label: 'Late',
+                    data: [],
+                    borderColor: '#f59e0b',
+                    backgroundColor: 'rgba(245, 158, 11, 0.10)',
+                    borderWidth: 2,
+                    tension: 0.35,
+                    fill: true
+                },
+                {
+                    label: 'Absent',
+                    data: [],
+                    borderColor: '#ef4444',
+                    backgroundColor: 'rgba(239, 68, 68, 0.08)',
+                    borderWidth: 2,
+                    tension: 0.35,
+                    fill: true
+                }
+            ]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: true,
+            plugins: {
+                legend: {
+                    position: 'bottom'
+                }
+            },
+            scales: {
+                y: {
+                    beginAtZero: true
+                }
+            }
+        }
+    });
+}
+
+const teacherAnalyticsCharts = {
+    daily: createTeacherAnalyticsChart('attendanceChartDaily'),
+    weekly: createTeacherAnalyticsChart('attendanceChartWeekly'),
+    monthly: createTeacherAnalyticsChart('attendanceChartMonthly'),
+    semester: createTeacherAnalyticsChart('attendanceChartSemester')
+};
+
+const teacherAnalyticsSectionSelect = document.getElementById('attendanceAnalyticsSection');
+const teacherAnalyticsLoading = document.getElementById('attendanceAnalyticsLoading');
+const teacherAnalyticsEmpty = document.getElementById('attendanceAnalyticsEmpty');
+
+function refreshTeacherAttendanceAnalytics() {
+    const params = new URLSearchParams();
+    if (teacherAnalyticsSectionSelect && teacherAnalyticsSectionSelect.value) {
+        params.set('section_id', teacherAnalyticsSectionSelect.value);
+    }
+
+    if (teacherAnalyticsLoading) {
+        teacherAnalyticsLoading.style.display = 'block';
+    }
+    if (teacherAnalyticsEmpty) {
+        teacherAnalyticsEmpty.style.display = 'none';
+    }
+
+    const analyticsTypes = ['daily', 'weekly', 'monthly', 'semester'];
+    const requests = analyticsTypes.map((type) => {
+        const typeParams = new URLSearchParams(params.toString());
+        typeParams.set('type', type);
+        return fetch('../api/dashboard-attendance.php?' + typeParams.toString())
+            .then(response => response.json())
+            .then(data => ({ type, data }))
+            .catch(() => ({ type, data: { labels: [], present: [], late: [], absent: [] } }));
+    });
+
+    Promise.all(requests)
+        .then(results => {
+            let hasAnyData = false;
+
+            results.forEach(({ type, data }) => {
+                const chart = teacherAnalyticsCharts[type];
+                if (!chart) {
+                    return;
+                }
+
+                const labels = Array.isArray(data.labels) ? data.labels : [];
+                const present = Array.isArray(data.present) ? data.present : [];
+                const late = Array.isArray(data.late) ? data.late : [];
+                const absent = Array.isArray(data.absent) ? data.absent : [];
+                const allZeros = [...present, ...late, ...absent].every(v => Number(v || 0) === 0);
+
+                if (labels.length > 0 && !allZeros) {
+                    hasAnyData = true;
+                }
+
+                chart.data.labels = labels;
+                chart.data.datasets[0].data = present;
+                chart.data.datasets[1].data = late;
+                chart.data.datasets[2].data = absent;
+                chart.update();
+            });
+
+            if (teacherAnalyticsEmpty) {
+                teacherAnalyticsEmpty.style.display = hasAnyData ? 'none' : 'block';
+            }
+        })
+        .finally(() => {
+            if (teacherAnalyticsLoading) {
+                teacherAnalyticsLoading.style.display = 'none';
+            }
+        });
+}
+
+if (teacherAnalyticsSectionSelect) {
+    teacherAnalyticsSectionSelect.addEventListener('change', refreshTeacherAttendanceAnalytics);
+}
+
+refreshTeacherAttendanceAnalytics();
+</script>
 
 <?php require '../includes/footer.php'; ?>

@@ -4,6 +4,9 @@
  * CAMS - Criminology Attendance Monitoring System
  */
 
+// Keep app/database time aligned for attendance logs.
+date_default_timezone_set('Asia/Manila');
+
 // Database credentials
 define('DB_HOST', 'localhost');
 define('DB_USER', 'root');
@@ -24,6 +27,7 @@ if ($mysqli->connect_error) {
 
 // Set charset to utf8mb4
 $mysqli->set_charset("utf8mb4");
+$mysqli->query("SET time_zone = '+08:00'");
 
 // Enable error reporting (disable in production)
 mysqli_report(MYSQLI_REPORT_ERROR | MYSQLI_REPORT_STRICT);

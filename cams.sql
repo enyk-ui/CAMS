@@ -3,7 +3,7 @@
 -- https://www.phpmyadmin.net/
 --
 -- Host: 127.0.0.1
--- Generation Time: Apr 09, 2026 at 09:16 AM
+-- Generation Time: Apr 10, 2026 at 02:14 PM
 -- Server version: 10.4.32-MariaDB
 -- PHP Version: 8.2.12
 
@@ -64,6 +64,17 @@ CREATE TABLE `attendance` (
   `updated_at` timestamp NOT NULL DEFAULT current_timestamp() ON UPDATE current_timestamp()
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 
+--
+-- Dumping data for table `attendance`
+--
+
+INSERT INTO `attendance` (`id`, `student_id`, `attendance_date`, `time_in_am`, `time_out_am`, `time_in_pm`, `time_out_pm`, `status`, `notes`, `created_at`, `updated_at`) VALUES
+(1, 15, '2026-04-09', NULL, NULL, '14:17:35', '18:45:36', 'present', 'Backfilled from attendance_logs', '2026-04-09 06:17:35', '2026-04-09 10:45:39'),
+(2, 23, '2026-04-09', NULL, NULL, '23:43:39', '23:44:09', 'present', NULL, '2026-04-09 21:43:39', '2026-04-09 21:44:09'),
+(3, 23, '2026-04-10', '05:49:39', '06:07:52', NULL, NULL, 'present', NULL, '2026-04-09 21:49:39', '2026-04-09 22:07:52'),
+(4, 15, '2026-04-10', '06:08:37', '06:55:54', NULL, NULL, 'present', NULL, '2026-04-09 22:08:37', '2026-04-09 22:55:54'),
+(5, 25, '2026-04-10', NULL, NULL, '20:01:12', NULL, 'late', NULL, '2026-04-10 12:01:12', '2026-04-10 12:01:12');
+
 -- --------------------------------------------------------
 
 --
@@ -71,7 +82,7 @@ CREATE TABLE `attendance` (
 --
 
 CREATE TABLE `attendance_logs` (
-  `id` int(11) NOT NULL,
+  `id` bigint(20) UNSIGNED NOT NULL,
   `student_id` int(11) NOT NULL,
   `device_id` int(11) NOT NULL,
   `type` enum('IN','OUT') NOT NULL,
@@ -83,12 +94,29 @@ CREATE TABLE `attendance_logs` (
 --
 
 INSERT INTO `attendance_logs` (`id`, `student_id`, `device_id`, `type`, `timestamp`) VALUES
-(0, 15, 1, 'IN', '2026-04-09 06:17:35'),
-(0, 15, 1, 'OUT', '2026-04-09 06:17:46'),
-(0, 15, 1, 'IN', '2026-04-09 06:18:21'),
-(0, 15, 1, 'OUT', '2026-04-09 06:32:05'),
-(0, 15, 1, 'IN', '2026-04-09 07:08:37'),
-(0, 15, 1, 'OUT', '2026-04-09 07:08:41');
+(1, 15, 1, 'IN', '2026-04-09 06:17:35'),
+(2, 15, 1, 'OUT', '2026-04-09 06:17:46'),
+(3, 15, 1, 'IN', '2026-04-09 06:18:21'),
+(4, 15, 1, 'OUT', '2026-04-09 06:32:05'),
+(5, 15, 1, 'IN', '2026-04-09 07:08:37'),
+(6, 15, 1, 'OUT', '2026-04-09 07:08:41'),
+(7, 15, 1, 'IN', '2026-04-09 10:41:52'),
+(8, 15, 1, 'OUT', '2026-04-09 10:42:31'),
+(9, 15, 1, 'IN', '2026-04-09 10:42:35'),
+(10, 15, 1, 'OUT', '2026-04-09 10:42:35'),
+(11, 15, 1, 'OUT', '2026-04-09 10:42:41'),
+(12, 15, 1, 'IN', '2026-04-09 10:42:45'),
+(13, 15, 1, 'OUT', '2026-04-09 10:43:40'),
+(14, 15, 1, 'IN', '2026-04-09 10:43:56'),
+(15, 15, 1, 'OUT', '2026-04-09 10:45:36'),
+(16, 15, 1, 'IN', '2026-04-09 10:45:39'),
+(17, 23, 1, 'IN', '2026-04-09 21:43:39'),
+(18, 23, 1, 'OUT', '2026-04-09 21:44:09'),
+(19, 23, 1, 'IN', '2026-04-09 21:49:39'),
+(20, 23, 1, 'OUT', '2026-04-09 22:07:52'),
+(21, 15, 1, 'IN', '2026-04-09 22:08:37'),
+(22, 15, 1, 'OUT', '2026-04-09 22:55:54'),
+(23, 25, 1, 'IN', '2026-04-10 12:01:12');
 
 -- --------------------------------------------------------
 
@@ -202,7 +230,20 @@ INSERT INTO `device_commands` (`id`, `device_id`, `mode`, `student_id`, `finger_
 (46, 1, 'ENROLL', 20, 1, NULL, 2, 3, 'FAILED', 'getImage#2 code=1', '2026-04-09 06:39:22', '2026-04-09 06:39:31'),
 (47, 1, 'ENROLL', 20, 1, NULL, NULL, 3, 'FAILED', 'Retry enrollment requested', '2026-04-09 06:44:40', '2026-04-09 06:44:40'),
 (48, 1, 'ENROLL', 20, 1, NULL, NULL, 3, 'FAILED', 'Retry enrollment requested', '2026-04-09 06:44:40', '2026-04-09 06:44:42'),
-(49, 1, 'ENROLL', 20, 1, NULL, NULL, 3, 'FAILED', 'Mode switched to attendance', '2026-04-09 06:44:42', '2026-04-09 06:44:46');
+(49, 1, 'ENROLL', 20, 1, NULL, NULL, 3, 'FAILED', 'Mode switched to attendance', '2026-04-09 06:44:42', '2026-04-09 06:44:46'),
+(50, 1, 'ENROLL', 21, 1, NULL, NULL, 3, 'FAILED', 'Mode switched to attendance', '2026-04-09 21:24:20', '2026-04-09 21:29:24'),
+(51, 1, 'ENROLL', 22, 1, NULL, NULL, 3, 'FAILED', 'Registration cancelled by admin', '2026-04-09 21:29:30', '2026-04-09 21:29:38'),
+(52, 1, 'ENROLL', 23, 1, NULL, 1, 3, 'FAILED', 'getImage#1 code=32', '2026-04-09 21:30:00', '2026-04-09 21:34:31'),
+(53, 1, 'ENROLL', 23, 1, 21, 3, 3, 'COMPLETED', 'total_fingers:2', '2026-04-09 21:41:19', '2026-04-09 21:41:38'),
+(54, 1, 'ENROLL', 23, 2, 22, 3, 3, 'COMPLETED', 'total_fingers:2', '2026-04-09 21:41:38', '2026-04-09 21:41:48'),
+(55, 1, 'IDLE', NULL, NULL, NULL, NULL, 3, 'PENDING', NULL, '2026-04-09 21:41:48', '2026-04-09 21:41:48'),
+(56, 1, 'ENROLL', 24, 1, 1, 3, 3, 'COMPLETED', 'total_fingers:3', '2026-04-09 22:35:10', '2026-04-09 22:35:23'),
+(57, 1, 'ENROLL', 24, 2, NULL, 1, 3, 'FAILED', 'duplicate finger detected sensor_id=1', '2026-04-09 22:35:23', '2026-04-09 22:35:24'),
+(58, 1, 'DELETE', 24, NULL, 1, NULL, 3, 'COMPLETED', NULL, '2026-04-09 22:36:01', '2026-04-09 22:51:49'),
+(59, 1, 'ENROLL', 24, 1, NULL, 1, 3, 'FAILED', 'getImage#1 timeout', '2026-04-09 22:36:01', '2026-04-09 22:52:15'),
+(60, 1, 'ENROLL', 24, 1, NULL, NULL, 3, 'FAILED', 'Mode switched to attendance', '2026-04-09 23:36:14', '2026-04-09 23:36:17'),
+(61, 1, 'ENROLL', 25, 1, 1, 3, 3, 'COMPLETED', 'total_fingers:1', '2026-04-10 12:00:23', '2026-04-10 12:00:36'),
+(62, 1, 'IDLE', NULL, NULL, NULL, NULL, 3, 'PENDING', NULL, '2026-04-10 12:00:37', '2026-04-10 12:00:37');
 
 -- --------------------------------------------------------
 
@@ -225,7 +266,10 @@ CREATE TABLE `fingerprints` (
 
 INSERT INTO `fingerprints` (`id`, `student_id`, `finger_index`, `sensor_id`, `device_id`, `created_at`) VALUES
 (2, 15, 1, 19, 1, '2026-04-09 06:14:56'),
-(3, 15, 2, 20, 1, '2026-04-09 06:15:06');
+(3, 15, 2, 20, 1, '2026-04-09 06:15:06'),
+(4, 23, 1, 21, 1, '2026-04-09 21:41:38'),
+(5, 23, 2, 22, 1, '2026-04-09 21:41:48'),
+(7, 25, 1, 1, 1, '2026-04-10 12:00:36');
 
 -- --------------------------------------------------------
 
@@ -458,10 +502,10 @@ CREATE TABLE `settings` (
 INSERT INTO `settings` (`id`, `setting_key`, `setting_value`, `description`, `updated_at`) VALUES
 (1, 'late_threshold_minutes', '15', 'Minutes past AM start time to mark as late', '2026-04-02 05:18:02'),
 (2, 'absent_threshold_hours', '2', 'Hours after AM start to mark as absent if no scan', '2026-04-02 05:18:02'),
-(3, 'am_start_time', '08:00:00', 'AM session start time', '2026-04-02 05:18:02'),
-(4, 'am_end_time', '12:00:00', 'AM session end time', '2026-04-02 05:18:02'),
-(5, 'pm_start_time', '13:00:00', 'PM session start time', '2026-04-02 05:18:02'),
-(6, 'pm_end_time', '17:00:00', 'PM session end time', '2026-04-02 05:18:02'),
+(3, 'am_start_time', '08:00', 'AM session start time', '2026-04-09 11:57:41'),
+(4, 'am_end_time', '12:00', 'AM session end time', '2026-04-09 11:57:41'),
+(5, 'pm_start_time', '13:00', 'PM session start time', '2026-04-09 11:57:41'),
+(6, 'pm_end_time', '17:00', 'PM session end time', '2026-04-09 11:57:41'),
 (7, 'system_name', 'CAMS - Criminology Attendance System', 'System name for display', '2026-04-02 05:18:02'),
 (8, 'email_from', 'noreply@cams.local', 'Email sender address', '2026-04-02 05:18:02'),
 (9, 'notification_enabled', 'true', 'Enable/disable email notifications', '2026-04-02 05:18:02'),
@@ -494,10 +538,12 @@ CREATE TABLE `students` (
 --
 
 INSERT INTO `students` (`id`, `student_id`, `first_name`, `middle_initial`, `last_name`, `extension`, `email`, `year`, `section`, `status`, `created_at`, `updated_at`) VALUES
-(1, '2024-001', 'Juan', NULL, 'Dela Cruz', NULL, 'juan@student.edu.ph', 1, 'A', 'active', '2026-04-02 05:18:02', '2026-04-02 05:18:02'),
-(2, 'adas', 'oefoO', 'O', 'OOKD', NULL, 'dada@ffs.vom', 1, 'WQDW', 'active', '2026-04-05 10:17:25', '2026-04-05 10:17:25'),
-(3, 'DWQ', 'W', 'W', 'Q', NULL, 'W@GM.D', 1, 'W', 'active', '2026-04-05 10:19:35', '2026-04-05 10:19:35'),
-(15, '210395', 'Alfred', 'C', 'Marcelino', 'jr', 'alfredmarcelinoii45@gmail.com', 4, 'Beta', 'active', '2026-04-09 06:14:39', '2026-04-09 06:15:58');
+(1, '2024-001', 'Juan', '', 'Dela Cruz', '', 'juan@student.edu.ph', 1, 'Alpha', 'active', '2026-04-02 05:18:02', '2026-04-09 22:33:41'),
+(2, '126583213', 'Mark', 'O', 'Fernando', '', 'dada@ffs.vom', 1, 'Beta', 'active', '2026-04-05 10:17:25', '2026-04-09 22:33:29'),
+(3, '53178351', 'Warren', 'W', 'Suwoj', '', 'W@GM.D', 1, 'Alpha', 'active', '2026-04-05 10:19:35', '2026-04-09 22:26:47'),
+(15, '210395', 'Alfred', 'C', 'Marcelino', 'jr', 'alfredmarcelinoii45@gmail.com', 4, 'Beta', 'active', '2026-04-09 06:14:39', '2026-04-09 21:16:14'),
+(23, '2103951', 'Alfred', 'C', 'Marcelino', 'Jr', 'alfredmarcelino455@gmail.com', 2, 'Alpha', 'active', '2026-04-09 21:29:58', '2026-04-09 21:42:10'),
+(25, '234324324', 'Fsg', 'G', 'Fgdgr', 'Jr', 'fasfbs@trt@jgj.g', 4, 'Charlie', 'active', '2026-04-10 12:00:17', '2026-04-10 12:00:40');
 
 -- --------------------------------------------------------
 
@@ -559,16 +605,22 @@ CREATE TABLE `users` (
   `role` enum('admin','teacher') NOT NULL DEFAULT 'teacher',
   `status` enum('active','inactive') NOT NULL DEFAULT 'active',
   `created_at` timestamp NOT NULL DEFAULT current_timestamp(),
-  `updated_at` timestamp NOT NULL DEFAULT current_timestamp() ON UPDATE current_timestamp()
+  `updated_at` timestamp NOT NULL DEFAULT current_timestamp() ON UPDATE current_timestamp(),
+  `section` varchar(50) DEFAULT NULL,
+  `school_year_label` varchar(20) DEFAULT NULL,
+  `year_level` tinyint(3) UNSIGNED DEFAULT NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 --
 -- Dumping data for table `users`
 --
 
-INSERT INTO `users` (`id`, `username`, `password`, `full_name`, `email`, `role`, `status`, `created_at`, `updated_at`) VALUES
-(1, 'admin', '$2y$10$woShL7UfMUq6DwHOktsatuna70k4t3aYQ7kGQGXJEoZ.q/G9/ZkJe', 'Administrator', 'admin@cams.edu.ph', 'admin', 'active', '2026-04-09 05:41:37', '2026-04-09 05:41:37'),
-(2, 'teacher', '$2y$10$X904biABI8Hs3OR/HU/nLOrliiDXnLWdu5SWke2bnk7VJriCWKAP.', 'Demo Teacher', 'teacher@cams.edu.ph', 'teacher', 'active', '2026-04-09 05:41:37', '2026-04-09 05:41:37');
+INSERT INTO `users` (`id`, `username`, `password`, `full_name`, `email`, `role`, `status`, `created_at`, `updated_at`, `section`, `school_year_label`, `year_level`) VALUES
+(1, 'admin', '$2y$10$woShL7UfMUq6DwHOktsatuna70k4t3aYQ7kGQGXJEoZ.q/G9/ZkJe', 'Administrator', 'admin@cams.edu.ph', 'admin', 'active', '2026-04-09 05:41:37', '2026-04-09 05:41:37', NULL, NULL, NULL),
+(2, 'teacher', '$2y$10$q4pNp8NchbZyI5pvtYuMQ.s9g4udDqgQqFmO73Tlzws1wowUN14ZS', 'teacher 1', 'teacher@cams.edu.ph', 'teacher', 'active', '2026-04-09 05:41:37', '2026-04-10 04:47:59', 'Alpha', '2025-2026', 1),
+(3, 'Teacher2', '$2y$10$3iBEda/CQYtKzvKUPlgRl.7cPYCtfcOoIAPz975i0FPVtIwnr.l0q', 'Demo Teacher', 'alfredmarcelinoii45@gmail.com', 'teacher', 'active', '2026-04-09 21:17:21', '2026-04-09 21:17:21', 'Beta', '2025-2026', 1),
+(5, 'teacher3', '$2y$10$pDrLw9OUzj3FLzcR6NS3hunLiPwYw8j0nNjipF1kIWFloPUB8xYNi', 'Demo Teacher', 'alfredmarcelino455@gmail.com', 'teacher', 'active', '2026-04-09 21:22:07', '2026-04-09 21:22:07', 'Alpha', '2025-2026', 2),
+(6, 'ete', '$2y$10$ONT9s2c2SCGc3bdO.aExjufqAOpQsszCWnVilc3BvnfTKFeQcPJ8S', 'Demo Teacher', 'ada@gsz.bo', 'teacher', 'active', '2026-04-10 11:59:26', '2026-04-10 11:59:26', 'Charlie', '2025-2026', 4);
 
 -- --------------------------------------------------------
 
@@ -608,6 +660,12 @@ ALTER TABLE `attendance`
   ADD UNIQUE KEY `unique_attendance_per_day` (`student_id`,`attendance_date`),
   ADD KEY `idx_attendance_date` (`attendance_date`),
   ADD KEY `idx_status` (`status`);
+
+--
+-- Indexes for table `attendance_logs`
+--
+ALTER TABLE `attendance_logs`
+  ADD PRIMARY KEY (`id`);
 
 --
 -- Indexes for table `device_commands`
@@ -709,19 +767,25 @@ ALTER TABLE `admins`
 -- AUTO_INCREMENT for table `attendance`
 --
 ALTER TABLE `attendance`
-  MODIFY `id` int(11) NOT NULL AUTO_INCREMENT;
+  MODIFY `id` int(11) NOT NULL AUTO_INCREMENT, AUTO_INCREMENT=6;
+
+--
+-- AUTO_INCREMENT for table `attendance_logs`
+--
+ALTER TABLE `attendance_logs`
+  MODIFY `id` bigint(20) UNSIGNED NOT NULL AUTO_INCREMENT, AUTO_INCREMENT=24;
 
 --
 -- AUTO_INCREMENT for table `device_commands`
 --
 ALTER TABLE `device_commands`
-  MODIFY `id` bigint(20) UNSIGNED NOT NULL AUTO_INCREMENT, AUTO_INCREMENT=50;
+  MODIFY `id` bigint(20) UNSIGNED NOT NULL AUTO_INCREMENT, AUTO_INCREMENT=63;
 
 --
 -- AUTO_INCREMENT for table `fingerprints`
 --
 ALTER TABLE `fingerprints`
-  MODIFY `id` int(11) NOT NULL AUTO_INCREMENT, AUTO_INCREMENT=4;
+  MODIFY `id` int(11) NOT NULL AUTO_INCREMENT, AUTO_INCREMENT=8;
 
 --
 -- AUTO_INCREMENT for table `notification_queue`
@@ -751,13 +815,13 @@ ALTER TABLE `school_years`
 -- AUTO_INCREMENT for table `settings`
 --
 ALTER TABLE `settings`
-  MODIFY `id` int(11) NOT NULL AUTO_INCREMENT, AUTO_INCREMENT=38;
+  MODIFY `id` int(11) NOT NULL AUTO_INCREMENT, AUTO_INCREMENT=353;
 
 --
 -- AUTO_INCREMENT for table `students`
 --
 ALTER TABLE `students`
-  MODIFY `id` int(11) NOT NULL AUTO_INCREMENT, AUTO_INCREMENT=21;
+  MODIFY `id` int(11) NOT NULL AUTO_INCREMENT, AUTO_INCREMENT=26;
 
 --
 -- AUTO_INCREMENT for table `teachers`
@@ -769,7 +833,7 @@ ALTER TABLE `teachers`
 -- AUTO_INCREMENT for table `users`
 --
 ALTER TABLE `users`
-  MODIFY `id` int(11) NOT NULL AUTO_INCREMENT, AUTO_INCREMENT=3;
+  MODIFY `id` int(11) NOT NULL AUTO_INCREMENT, AUTO_INCREMENT=7;
 
 --
 -- Constraints for dumped tables

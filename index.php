@@ -19,6 +19,9 @@ if (isset($_SESSION['admin_id']) && isset($_SESSION['role'])) {
 require_once 'config/db.php';
 
 $error = '';
+$indexLogoRelativePath = 'asset/logo/logo.png';
+$indexLogoAbsolutePath = __DIR__ . '/asset/logo/logo.png';
+$indexHasLogo = is_file($indexLogoAbsolutePath);
 
 // Handle login form submission
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
@@ -68,6 +71,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     <title>CAMS - Criminology Attendance Monitoring System</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
     <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.7.2/font/bootstrap-icons.css" rel="stylesheet">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Montserrat:wght@500;600;700;800&display=swap" rel="stylesheet">
@@ -132,16 +136,25 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
 
         .logo-icon {
-            width: 60px;
-            height: 60px;
+            width: 74px;
+            height: 74px;
             background: linear-gradient(135deg, #ef4444 0%, #7f1d1d 100%);
             border-radius: 15px;
             display: flex;
             align-items: center;
             justify-content: center;
             margin-right: 15px;
-            font-size: 2rem;
+            font-size: 2.2rem;
             color: white;
+        }
+
+        .logo-icon img {
+            width: 68px;
+            height: 68px;
+            object-fit: contain;
+            border-radius: 10px;
+            background: transparent;
+            padding: 0;
         }
 
         .logo-text h1 {
@@ -434,7 +447,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
                 <div class="logo-header">
                     <div class="logo-icon">
-                        <i class="bi bi-fingerprint"></i>
+                        <?php if ($indexHasLogo): ?>
+                            <img src="<?php echo htmlspecialchars($indexLogoRelativePath); ?>" alt="CAMS Logo">
+                        <?php else: ?>
+                            <i class="fa-solid fa-fingerprint"></i>
+                        <?php endif; ?>
                     </div>
                     <div class="logo-text">
                         <h1>CAMS</h1>

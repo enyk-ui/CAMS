@@ -19,6 +19,12 @@ try {
 
     $studentId = require_positive_int($input, 'student_id');
     $currentFingerIndex = require_positive_int($input, 'finger_index');
+    if ($currentFingerIndex !== 1) {
+        api_response(400, [
+            'success' => false,
+            'message' => 'Only finger_index 1 is supported'
+        ]);
+    }
 
     $linkColumn = advanceFingerColumnExists($mysqli, 'student_id') ? 'student_id' : (advanceFingerColumnExists($mysqli, 'user_id') ? 'user_id' : null);
     if ($linkColumn === null) {
@@ -45,47 +51,22 @@ try {
 
     $deviceId = (int)$command['device_id'];
 
-    $totalFingers = 1;
-    if (!empty($command['error_message']) && preg_match('/total_fingers:(\d+)/', (string)$command['error_message'], $m)) {
-        $totalFingers = max(1, (int)$m[1]);
-    }
-
     $mysqli->begin_transaction();
 
-    if ($currentFingerIndex < $totalFingers) {
-        // Create command for next finger.
-        $nextFinger = $currentFingerIndex + 1;
-        $notes = 'total_fingers:' . (string)$totalFingers;
+    // Single-fingerprint mode: switch to IDLE immediately after first completed finger.
+    $idleCommandStmt = $mysqli->prepare("INSERT INTO device_commands (device_id, mode, status) VALUES (?, 'IDLE', 'PENDING')");
+    $idleCommandStmt->bind_param('i', $deviceId);
+    $idleCommandStmt->execute();
 
-        $nextCommandStmt = $mysqli->prepare("INSERT INTO device_commands (device_id, mode, {$linkColumn}, finger_index, status, error_message) VALUES (?, 'ENROLL', ?, ?, 'PENDING', ?)");
-        $nextCommandStmt->bind_param('iiis', $deviceId, $studentId, $nextFinger, $notes);
-        $nextCommandStmt->execute();
+    $mysqli->commit();
 
-        $mysqli->commit();
-
-        api_response(200, [
-            'success' => true,
-            'message' => 'Advanced to next finger',
-            'next_finger_index' => $nextFinger,
-            'total_fingers' => $totalFingers,
-            'enrollment_complete' => false
-        ]);
-    } else {
-        // All fingers enrolled, switch to IDLE.
-        $idleCommandStmt = $mysqli->prepare("INSERT INTO device_commands (device_id, mode, status) VALUES (?, 'IDLE', 'PENDING')");
-        $idleCommandStmt->bind_param('i', $deviceId);
-        $idleCommandStmt->execute();
-
-        $mysqli->commit();
-
-        api_response(200, [
-            'success' => true,
-            'message' => 'All fingers enrolled',
-            'next_finger_index' => null,
-            'total_fingers' => $totalFingers,
-            'enrollment_complete' => true
-        ]);
-    }
+    api_response(200, [
+        'success' => true,
+        'message' => 'Enrollment complete',
+        'next_finger_index' => null,
+        'total_fingers' => 1,
+        'enrollment_complete' => true
+    ]);
 } catch (Throwable $e) {
     if (isset($mysqli) && $mysqli->errno) {
         $mysqli->rollback();
