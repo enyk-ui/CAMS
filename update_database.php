@@ -508,4 +508,10 @@ echo "- attendance\n";
 echo "- attendance_logs\n";
 echo "- devices\n";
 echo "- device_commands\n";
+/*
+ * © 2026 TambyTech.
+ * This source code is proprietary and confidential.
+ * Any unauthorized use, copying, modification, distribution, or disclosure is strictly prohibited.
+ * All rights reserved.
+ */
 ?>

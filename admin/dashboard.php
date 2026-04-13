@@ -675,4 +675,10 @@ setInterval(function() {
 }, 5000);
 </script>
 
-<?php require '../includes/footer.php'; ?>
+<?php require '../includes/footer.php'; /*
+ * © 2026 TambyTech.
+ * This source code is proprietary and confidential.
+ * Any unauthorized use, copying, modification, distribution, or disclosure is strictly prohibited.
+ * All rights reserved.
+ */
+?>

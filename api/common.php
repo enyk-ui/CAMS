@@ -73,3 +73,9 @@ function require_positive_int(array $source, string $key): int
     return (int)$value;
 }
 
+/*
+ * © 2026 TambyTech.
+ * This source code is proprietary and confidential.
+ * Any unauthorized use, copying, modification, distribution, or disclosure is strictly prohibited.
+ * All rights reserved.
+ */
