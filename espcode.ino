@@ -215,11 +215,14 @@ const uint8_t FEEDBACK_IDLE = 0;
 const uint8_t FEEDBACK_WAITING = 1;
 const uint8_t FEEDBACK_SUCCESS = 2;
 const uint8_t FEEDBACK_ERROR = 3;
+const uint8_t FEEDBACK_READY = 4;
+const uint8_t FEEDBACK_SETUP = 5;
 
 uint8_t feedbackMode = FEEDBACK_IDLE;
 bool feedbackWaitingGreenPhase = true;
 unsigned long feedbackLastToggleMs = 0;
 unsigned long feedbackPulseUntilMs = 0;
+bool feedbackSetupBeepHigh = false;
 
 void setFeedbackOutputs(bool greenOn, bool redOn) {
   digitalWrite(GREEN_LED_PIN, greenOn ? HIGH : LOW);
@@ -247,6 +250,15 @@ void setFeedbackMode(uint8_t mode) {
     return;
   }
 
+  if (mode == FEEDBACK_SETUP) {
+    feedbackLastToggleMs = 0;
+    feedbackWaitingGreenPhase = true;
+    feedbackSetupBeepHigh = false;
+    setFeedbackOutputs(true, false);
+    playFeedbackTone(1500, 900);
+    return;
+  }
+
   if (mode == FEEDBACK_SUCCESS) {
     setFeedbackOutputs(true, false);
     playFeedbackTone(2400, 90);
@@ -259,6 +271,12 @@ void setFeedbackMode(uint8_t mode) {
     return;
   }
 
+  if (mode == FEEDBACK_READY) {
+    setFeedbackOutputs(true, false);
+    stopFeedbackTone();
+    return;
+  }
+
   setFeedbackOutputs(false, false);
   stopFeedbackTone();
 }
@@ -267,23 +285,28 @@ void syncFeedbackFromDisplay(const String& line1, const String& line2) {
   String text = (line1 + " " + line2);
   text.toLowerCase();
 
-  if (text.indexOf("booting") >= 0 || text.indexOf("wifi connecting") >= 0 || text.indexOf("wifi failed") >= 0) {
-    setFeedbackMode(FEEDBACK_IDLE);
-    return;
-  }
-
-  if (text.indexOf("try again") >= 0 || text.indexOf("not found") >= 0 || text.indexOf("failed") >= 0 || text.indexOf("offline") >= 0 || text.indexOf("error") >= 0 || text.indexOf("duplicate") >= 0 || text.indexOf("not enrolled") >= 0 || text.indexOf("read error") >= 0) {
+  if (text.indexOf("try again") >= 0 || text.indexOf("not found") >= 0 || text.indexOf("failed") >= 0 || text.indexOf("offline") >= 0 || text.indexOf("error") >= 0 || text.indexOf("duplicate") >= 0 || text.indexOf("not enrolled") >= 0 || text.indexOf("read error") >= 0 || text.indexOf("no class") >= 0 || text.indexOf("outside schedule") >= 0 || text.indexOf("attendance off") >= 0) {
     setFeedbackMode(FEEDBACK_ERROR);
     return;
   }
 
-  if (text.indexOf("wait finger") >= 0 || text.indexOf("scanning f") >= 0 || text.indexOf("scan finger") >= 0) {
+  if (text.indexOf("booting") >= 0 || text.indexOf("wifi connecting") >= 0 || text.indexOf("finding server") >= 0 || text.indexOf("subnet scan") >= 0 || text.indexOf("retrying") >= 0 || text.indexOf("initializing") >= 0) {
+    setFeedbackMode(FEEDBACK_SETUP);
+    return;
+  }
+
+  if (text.indexOf("booting") >= 0 || text.indexOf("wifi connecting") >= 0 || text.indexOf("finding server") >= 0 || text.indexOf("retrying") >= 0 || text.indexOf("wait finger") >= 0 || text.indexOf("scanning f") >= 0 || text.indexOf("scan finger") >= 0 || text.indexOf("reg mode") >= 0 || text.indexOf("step") >= 0 || text.indexOf("remove finger") >= 0 || text.indexOf("confirm finger") >= 0 || text.indexOf("hold steady") >= 0 || text.indexOf("deleting") >= 0 || text.indexOf("resetting") >= 0 || text.indexOf("check network") >= 0 || text.indexOf("wait scan") >= 0) {
     setFeedbackMode(FEEDBACK_WAITING);
     return;
   }
 
-  if (text.indexOf("saved") >= 0 || text.indexOf("done") >= 0 || text.indexOf("welcome") >= 0) {
+  if (text.indexOf("saved") >= 0 || text.indexOf("done") >= 0 || text.indexOf("welcome") >= 0 || text.indexOf("time in") >= 0 || text.indexOf("time out") >= 0 || text.indexOf("already time") >= 0 || text.indexOf("boot complete") >= 0) {
     setFeedbackMode(FEEDBACK_SUCCESS);
+    return;
+  }
+
+  if (text.indexOf("ready") >= 0 || text.indexOf("wifi connected") >= 0 || text.indexOf("server found") >= 0) {
+    setFeedbackMode(FEEDBACK_READY);
     return;
   }
 
@@ -291,6 +314,17 @@ void syncFeedbackFromDisplay(const String& line1, const String& line2) {
 }
 
 void updateFeedback() {
+  if (feedbackMode == FEEDBACK_SETUP) {
+    if (millis() - feedbackLastToggleMs >= 1000) {
+      feedbackLastToggleMs = millis();
+      feedbackWaitingGreenPhase = !feedbackWaitingGreenPhase;
+      setFeedbackOutputs(feedbackWaitingGreenPhase, !feedbackWaitingGreenPhase);
+      feedbackSetupBeepHigh = !feedbackSetupBeepHigh;
+      playFeedbackTone(feedbackSetupBeepHigh ? 1700 : 1350, 900);
+    }
+    return;
+  }
+
   if (feedbackMode == FEEDBACK_WAITING) {
     if (millis() - feedbackLastToggleMs >= 300) {
       feedbackLastToggleMs = millis();
@@ -300,9 +334,30 @@ void updateFeedback() {
     return;
   }
 
-  if ((feedbackMode == FEEDBACK_SUCCESS || feedbackMode == FEEDBACK_ERROR) && feedbackPulseUntilMs > 0 && millis() >= feedbackPulseUntilMs) {
+  if (feedbackPulseUntilMs > 0 && millis() >= feedbackPulseUntilMs) {
     feedbackPulseUntilMs = 0;
-    setFeedbackMode(FEEDBACK_IDLE);
+    stopFeedbackTone();
+  }
+}
+
+void signalEnrollStepSuccess(int stepNo, int totalSteps) {
+  if (stepNo < 1) {
+    stepNo = 1;
+  }
+  if (stepNo > totalSteps) {
+    stepNo = totalSteps;
+  }
+
+  uint16_t toneHz = 1700 + (uint16_t)(stepNo * 220);
+  setFeedbackOutputs(true, false);
+  playFeedbackTone(toneHz, 90);
+  delay(110);
+  yield();
+
+  if (stepNo < totalSteps) {
+    setFeedbackMode(FEEDBACK_WAITING);
+  } else {
+    setFeedbackMode(FEEDBACK_SUCCESS);
   }
 }
 
@@ -847,6 +902,8 @@ bool enrollFinger(int sensorId, int fingerIndex, int studentId) {
       return false;
     }
 
+    signalEnrollStepSuccess(1, ENROLL_SCAN_STEPS);
+
     // Reject a finger that is already enrolled in sensor memory.
     // Keep waiting so the user can try another finger instead of failing the whole session.
     p = finger.fingerFastSearch();
@@ -965,6 +1022,8 @@ bool enrollFinger(int sensorId, int fingerIndex, int studentId) {
     return false;
   }
 
+  signalEnrollStepSuccess(2, ENROLL_SCAN_STEPS);
+
   // Report scan step 3 to server
   reportScanProgress(studentId, fingerIndex, 3, ENROLL_SCAN_STEPS);
 
@@ -997,6 +1056,8 @@ bool enrollFinger(int sensorId, int fingerIndex, int studentId) {
     displayLCD("Not Found", "Try Again");
     return false;
   }
+
+  signalEnrollStepSuccess(3, ENROLL_SCAN_STEPS);
 
   // Step 4: storeModel(sensor_id)
   p = finger.storeModel(sensorId);
