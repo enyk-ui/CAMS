@@ -150,7 +150,7 @@ function formatAttendanceHistoryName(array $record): string
         $name .= ' ' . strtolower($ext);
     }
 
-    return strtolower(trim($name));
+    return ucwords(strtolower(trim($name)));
 }
 
 function findSchoolYearByLabel(array $schoolYears, string $label): ?array
@@ -981,27 +981,25 @@ require '../includes/header.php';
                                     <th>No.</th>
                                     <th>Name</th>
                                     <th>Date</th>
-                                    <th>AM In</th>
-                                    <th>AM Out</th>
-                                    <th>PM In</th>
-                                    <th>PM Out</th>
+                                    <th>Time In</th>
+                                    <th>Time Out</th>
                                     <th>Status</th>
                                 </tr>
                             </thead>
                             <tbody>
                                 <?php $rowNumber = 1; foreach ($records as $record): ?>
+                                <?php
+                                    $timeInRaw = (string)($record['time_in_am'] ?: ($record['time_in_pm'] ?: ''));
+                                    $timeOutRaw = (string)($record['time_out_pm'] ?: ($record['time_out_am'] ?: ''));
+                                ?>
                                 <tr>
                                     <td><?php echo $rowNumber++; ?></td>
                                     <td><?php echo htmlspecialchars(formatAttendanceHistoryName($record)); ?></td>
-                                    <td><?php echo date('M d, Y', strtotime((string)$record['attendance_date'])); ?>
+                                    <td><?php echo date('l, M d, Y', strtotime((string)$record['attendance_date'])); ?>
                                     </td>
-                                    <td><?php echo $record['time_in_am'] ? date('H:i', strtotime($record['time_in_am'])) : '-'; ?>
+                                    <td><?php echo $timeInRaw !== '' ? date('H:i', strtotime($timeInRaw)) : '-'; ?>
                                     </td>
-                                    <td><?php echo $record['time_out_am'] ? date('H:i', strtotime($record['time_out_am'])) : '-'; ?>
-                                    </td>
-                                    <td><?php echo $record['time_in_pm'] ? date('H:i', strtotime($record['time_in_pm'])) : '-'; ?>
-                                    </td>
-                                    <td><?php echo $record['time_out_pm'] ? date('H:i', strtotime($record['time_out_pm'])) : '-'; ?>
+                                    <td><?php echo $timeOutRaw !== '' ? date('H:i', strtotime($timeOutRaw)) : '-'; ?>
                                     </td>
                                     <td>
                                         <span class="badge <?php

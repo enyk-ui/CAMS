@@ -53,9 +53,9 @@ const NAME_MAPPINGS = [
     'Vagan Hans Joshua' => 'Vigan Hans Joshua',
 ];
 
-// For code P only: 80% present, 10% late, 10% absent.
-const P_TO_LATE_PERCENT = 10;
-const P_TO_ABSENT_PERCENT = 10;
+// Target distribution for seeded attendance across all students.
+const TARGET_ABSENT_PERCENT = 10;
+const BASE_LATE_PERCENT = 15;
 
 $rows = [
     ['Acusar Adrian', 'P'],
@@ -280,20 +280,25 @@ function resolveStatus(string $code): string
 {
     $normalized = strtoupper(trim($code));
 
-    if ($normalized === 'L') {
-        return 'late';
-    }
-    if ($normalized === 'A') {
+    // Keep overall absence around 10% regardless of source code.
+    $absentRoll = random_int(1, 100);
+    if ($absentRoll <= TARGET_ABSENT_PERCENT) {
         return 'absent';
     }
 
-    // Default and P behavior.
-    $roll = random_int(1, 100);
-    if ($roll <= P_TO_LATE_PERCENT) {
-        return 'late';
+    if ($normalized === 'L') {
+        // Students tagged as L are more likely to be late than others.
+        return random_int(1, 100) <= 70 ? 'late' : 'present';
     }
-    if ($roll <= P_TO_LATE_PERCENT + P_TO_ABSENT_PERCENT) {
-        return 'absent';
+
+    if ($normalized === 'A') {
+        // A-coded rows are no longer forced absent to preserve 10% cap.
+        return random_int(1, 100) <= 30 ? 'late' : 'present';
+    }
+
+    // Default and P behavior.
+    if (random_int(1, 100) <= BASE_LATE_PERCENT) {
+        return 'late';
     }
 
     return 'present';

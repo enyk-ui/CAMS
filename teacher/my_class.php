@@ -7,6 +7,9 @@
 require_once '../config/db.php';
 require '../includes/header.php';
 
+header('Location: attendance_report.php');
+exit;
+
 function studentColumnExists(mysqli $mysqli, string $columnName): bool
 {
     $safeColumn = $mysqli->real_escape_string($columnName);

@@ -66,11 +66,6 @@
                 <span class="nav-label">Dashboard</span>
             </a>
 
-            <a href="my_class.php" class="nav-item <?php echo $current_page === 'my_class.php' ? 'active' : ''; ?>">
-                <i class="fa-solid fa-users"></i>
-                <span class="nav-label">My Class</span>
-            </a>
-
             <a href="attendance_report.php" class="nav-item <?php echo $current_page === 'attendance_report.php' ? 'active' : ''; ?>">
                 <i class="fa-solid fa-chart-bar"></i>
                 <span class="nav-label">Reports</span>
@@ -280,7 +275,7 @@
 
 <?php
 /*
- * © 2026 TambyTech.
+ * ï¿½ 2026 TambyTech.
  * This source code is proprietary and confidential.
  * Any unauthorized use, copying, modification, distribution, or disclosure is strictly prohibited.
  * All rights reserved.

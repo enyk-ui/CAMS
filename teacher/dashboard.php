@@ -206,6 +206,9 @@ if ($hasSectionIdColumn && !empty($teacherSectionIds)) {
             s.last_name,
             a.status,
             a.time_in_am,
+            a.time_out_am,
+            a.time_in_pm,
+            a.time_out_pm,
             a.attendance_date
         FROM attendance a
         INNER JOIN students s ON a.student_id = s.id
@@ -228,7 +231,7 @@ if ($hasSectionIdColumn && !empty($teacherSectionIds)) {
     }
 } else {
     $recentStmt = $mysqli->prepare(
-                'SELECT s.id AS student_pk, s.first_name, s.last_name, a.status, a.time_in_am, a.attendance_date
+                                'SELECT s.id AS student_pk, s.first_name, s.last_name, a.status, a.time_in_am, a.time_out_am, a.time_in_pm, a.time_out_pm, a.attendance_date
          FROM attendance a
          INNER JOIN students s ON a.student_id = s.id
          WHERE s.section = ?
@@ -377,16 +380,43 @@ if ($hasSectionIdColumn && !empty($teacherSectionIds)) {
                                     <tr>
                                         <th>Name</th>
                                         <th>Date</th>
-                                        <th>Time In</th>
+                                        <th>Time</th>
+                                        <th>Event</th>
                                         <th>Status</th>
                                     </tr>
                                 </thead>
                                 <tbody>
                                     <?php foreach ($recent as $record): ?>
+                                        <?php
+                                            $eventType = '-';
+                                            $eventTimeRaw = '';
+                                            if (!empty($record['time_out_pm'])) {
+                                                $eventType = 'OUT';
+                                                $eventTimeRaw = (string)$record['time_out_pm'];
+                                            } elseif (!empty($record['time_in_pm'])) {
+                                                $eventType = 'IN';
+                                                $eventTimeRaw = (string)$record['time_in_pm'];
+                                            } elseif (!empty($record['time_out_am'])) {
+                                                $eventType = 'OUT';
+                                                $eventTimeRaw = (string)$record['time_out_am'];
+                                            } elseif (!empty($record['time_in_am'])) {
+                                                $eventType = 'IN';
+                                                $eventTimeRaw = (string)$record['time_in_am'];
+                                            }
+                                        ?>
                                         <tr>
                                             <td><?php echo htmlspecialchars($record['first_name'] . ' ' . $record['last_name']); ?></td>
                                             <td><?php echo date('M d, Y', strtotime($record['attendance_date'])); ?></td>
-                                            <td><?php echo $record['time_in_am'] ? date('H:i', strtotime($record['time_in_am'])) : '-'; ?></td>
+                                            <td><?php echo $eventTimeRaw !== '' ? date('H:i', strtotime($eventTimeRaw)) : '-'; ?></td>
+                                            <td>
+                                                <?php if ($eventType === 'IN'): ?>
+                                                    <span class="badge bg-primary">Time In</span>
+                                                <?php elseif ($eventType === 'OUT'): ?>
+                                                    <span class="badge bg-secondary">Time Out</span>
+                                                <?php else: ?>
+                                                    -
+                                                <?php endif; ?>
+                                            </td>
                                             <td>
                                                 <span class="badge <?php
                                                     if ($record['status'] === 'present') echo 'badge-success';
