@@ -6,8 +6,17 @@
 ?>
 <aside class="sidebar">
     <div class="sidebar-header">
+        <?php
+        $logoRelativePath = '../asset/logo/logo.png';
+        $logoAbsolutePath = dirname(__DIR__) . '/asset/logo/logo.png';
+        $hasLogo = is_file($logoAbsolutePath);
+        ?>
         <div class="sidebar-brand">
-            <i class="bi bi-fingerprint"></i>
+            <?php if ($hasLogo): ?>
+                <img src="<?php echo htmlspecialchars($logoRelativePath); ?>" alt="CAMS Logo" class="sidebar-logo">
+            <?php else: ?>
+                <i class="fa-solid fa-fingerprint"></i>
+            <?php endif; ?>
             <span>CAMS</span>
         </div>
     </div>
@@ -25,6 +34,11 @@
                 <span class="nav-label">Dashboard</span>
             </a>
 
+            <a href="logs.php" class="nav-item <?php echo $current_page === 'logs.php' ? 'active' : ''; ?>">
+                <i class="fa-solid fa-clock"></i>
+                <span class="nav-label">Attendance Logs</span>
+            </a>
+
             <a href="students.php" class="nav-item <?php echo $current_page === 'students.php' ? 'active' : ''; ?>">
                 <i class="fa-solid fa-users"></i>
                 <span class="nav-label">Students</span>
@@ -35,24 +49,14 @@
                 <span class="nav-label">Registration</span>
             </a>
 
-            <a href="logs.php" class="nav-item <?php echo $current_page === 'logs.php' ? 'active' : ''; ?>">
-                <i class="fa-solid fa-clock"></i>
-                <span class="nav-label">Attendance Logs</span>
-            </a>
-
             <a href="users.php" class="nav-item <?php echo $current_page === 'users.php' ? 'active' : ''; ?>">
                 <i class="fa-solid fa-user-tie"></i>
-                <span class="nav-label">Users</span>
+                <span class="nav-label">Teachers</span>
             </a>
 
             <a href="settings.php" class="nav-item <?php echo $current_page === 'settings.php' ? 'active' : ''; ?>">
                 <i class="fa-solid fa-gear"></i>
                 <span class="nav-label">Settings</span>
-            </a>
-
-            <a href="notifications.php" class="nav-item <?php echo $current_page === 'notifications.php' ? 'active' : ''; ?>">
-                <i class="fa-solid fa-bell"></i>
-                <span class="nav-label">Notifications</span>
             </a>
 
         <?php elseif ($role === 'teacher'): ?>
@@ -62,19 +66,18 @@
                 <span class="nav-label">Dashboard</span>
             </a>
 
-            <a href="my_class.php" class="nav-item <?php echo $current_page === 'my_class.php' ? 'active' : ''; ?>">
-                <i class="fa-solid fa-users"></i>
-                <span class="nav-label">My Class</span>
-            </a>
-
             <a href="attendance_report.php" class="nav-item <?php echo $current_page === 'attendance_report.php' ? 'active' : ''; ?>">
                 <i class="fa-solid fa-chart-bar"></i>
                 <span class="nav-label">Reports</span>
             </a>
+            <a href="students.php" class="nav-item <?php echo $current_page === 'students.php' ? 'active' : ''; ?>">
+                <i class="fa-solid fa-pen-to-square"></i>
+                <span class="nav-label">Manage Students</span>
+            </a>
 
-            <a href="notifications.php" class="nav-item <?php echo $current_page === 'notifications.php' ? 'active' : ''; ?>">
-                <i class="fa-solid fa-bell"></i>
-                <span class="nav-label">Notifications</span>
+            <a href="my_account.php" class="nav-item <?php echo $current_page === 'my_account.php' ? 'active' : ''; ?>">
+                <i class="fa-solid fa-user-circle"></i>
+                <span class="nav-label">My Account</span>
             </a>
         <?php endif; ?>
     </nav>
@@ -95,17 +98,17 @@
     top: 0;
     width: 260px;
     height: 100vh;
-    background: #2c3e50;
+    background: #000000;
     display: flex;
     flex-direction: column;
     z-index: 1000;
     overflow-y: auto;
-    box-shadow: 4px 0 12px rgba(0, 0, 0, 0.1);
+    box-shadow: 6px 0 24px rgba(0, 0, 0, 0.24);
 }
 
 .sidebar-header {
     padding: 24px 20px;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+    border-bottom: 1px solid rgba(255, 255, 255, 0.16);
 }
 
 .sidebar-brand {
@@ -116,16 +119,26 @@
 }
 
 .sidebar-brand i {
-    width: 48px;
-    height: 48px;
-    background: #3b82f6;
+    width: 56px;
+    height: 56px;
+    background: #ff0000;
     border-radius: 12px;
     display: flex;
     align-items: center;
     justify-content: center;
-    font-size: 1.5rem;
+    font-size: 1.8rem;
     color: white;
-    box-shadow: 0 4px 12px rgba(59, 130, 246, 0.4);
+    box-shadow: 0 6px 18px rgba(255, 0, 0, 0.22);
+}
+
+.sidebar-logo {
+    width: 58px;
+    height: 58px;
+    object-fit: contain;
+    border-radius: 12px;
+    background: transparent;
+    padding: 0;
+    box-shadow: 0 6px 18px rgba(255, 0, 0, 0.22);
 }
 
 .sidebar-brand span {
@@ -150,9 +163,10 @@
     gap: 14px;
     padding: 14px 16px;
     border-radius: 10px;
-    color: rgba(255, 255, 255, 0.7);
+    color: rgba(255, 255, 255, 0.8);
     text-decoration: none;
     transition: all 0.2s ease;
+    border: 1px solid transparent;
 }
 
 .nav-item i {
@@ -167,24 +181,25 @@
 }
 
 .nav-item:hover {
-    background: rgba(59, 130, 246, 0.15);
-    color: #93c5fd;
+    background: rgba(255, 0, 0, 0.12);
+    color: #ffffff;
+    border-color: rgba(255, 0, 0, 0.35);
 }
 
 .nav-item.active {
-    background: #3b82f6;
+    background: #ff0000;
     color: white;
-    box-shadow: 0 4px 12px rgba(59, 130, 246, 0.3);
+    box-shadow: 0 6px 18px rgba(255, 0, 0, 0.24);
 }
 
 .nav-item.logout:hover {
-    background: rgba(239, 68, 68, 0.15);
-    color: #fca5a5;
+    background: rgba(255, 255, 255, 0.08);
+    color: #ffffff;
 }
 
 .sidebar-footer {
     padding: 16px;
-    border-top: 1px solid rgba(255, 255, 255, 0.1);
+    border-top: 1px solid rgba(255, 255, 255, 0.16);
 }
 
 /* Scrollbar styling */
@@ -197,12 +212,12 @@
 }
 
 .sidebar::-webkit-scrollbar-thumb {
-    background: rgba(255, 255, 255, 0.2);
+    background: rgba(255, 255, 255, 0.22);
     border-radius: 3px;
 }
 
 .sidebar::-webkit-scrollbar-thumb:hover {
-    background: rgba(255, 255, 255, 0.3);
+    background: rgba(255, 0, 0, 0.7);
 }
 
 /* Responsive design */
@@ -232,9 +247,15 @@
     }
 
     .sidebar-brand i {
-        width: 42px;
-        height: 42px;
-        font-size: 1.3rem;
+        width: 48px;
+        height: 48px;
+        font-size: 1.45rem;
+    }
+
+    .sidebar-logo {
+        width: 50px;
+        height: 50px;
+        border-radius: 10px;
     }
 
     .nav-item {
@@ -251,3 +272,12 @@
     }
 }
 </style>
+
+<?php
+/*
+ * � 2026 TambyTech.
+ * This source code is proprietary and confidential.
+ * Any unauthorized use, copying, modification, distribution, or disclosure is strictly prohibited.
+ * All rights reserved.
+ */
+?>

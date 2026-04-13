@@ -14,6 +14,82 @@ if (isset($_SESSION['admin_id'])) {
 
 require_once '../config/db.php';
 
+function fetchLoginSectionOptions(mysqli $mysqli, string $email = ''): array
+{
+    $options = [];
+
+    if ($email !== '') {
+        $teacherStmt = $mysqli->prepare("SELECT id FROM users WHERE role = 'teacher' AND email = ? LIMIT 1");
+        if ($teacherStmt) {
+            $teacherStmt->bind_param('s', $email);
+            $teacherStmt->execute();
+            $teacherRow = $teacherStmt->get_result()->fetch_assoc();
+            $teacherStmt->close();
+
+            if ($teacherRow) {
+                $teacherId = (int)($teacherRow['id'] ?? 0);
+                if ($teacherId > 0) {
+                    $assignedStmt = $mysqli->prepare(
+                        'SELECT s.name, s.year_grade
+                         FROM teacher_sections ts
+                         JOIN sections s ON s.id = ts.section_id
+                         WHERE ts.teacher_id = ?
+                         ORDER BY CAST(s.year_grade AS UNSIGNED) ASC, s.name ASC'
+                    );
+                    if ($assignedStmt) {
+                        $assignedStmt->bind_param('i', $teacherId);
+                        $assignedStmt->execute();
+                        $assignedResult = $assignedStmt->get_result();
+                        while ($row = $assignedResult->fetch_assoc()) {
+                            $sectionName = trim((string)($row['name'] ?? ''));
+                            if ($sectionName === '') {
+                                continue;
+                            }
+                            $options[] = [
+                                'value' => $sectionName,
+                                'label' => trim((string)($row['year_grade'] ?? '') . ' - ' . $sectionName),
+                            ];
+                        }
+                        $assignedStmt->close();
+                    }
+                }
+            }
+        }
+    }
+
+    if (!empty($options)) {
+        return $options;
+    }
+
+    $catalog = $mysqli->query('SELECT name, year_grade FROM sections ORDER BY CAST(year_grade AS UNSIGNED) ASC, name ASC');
+    if ($catalog) {
+        while ($row = $catalog->fetch_assoc()) {
+            $sectionName = trim((string)($row['name'] ?? ''));
+            if ($sectionName === '') {
+                continue;
+            }
+            $options[] = [
+                'value' => $sectionName,
+                'label' => trim((string)($row['year_grade'] ?? '') . ' - ' . $sectionName),
+            ];
+        }
+    }
+
+    if (!empty($options)) {
+        return $options;
+    }
+
+    $fallback = ['Alpha', 'Beta', 'Charlie', 'Delta'];
+    foreach ($fallback as $name) {
+        $options[] = [
+            'value' => $name,
+            'label' => $name,
+        ];
+    }
+
+    return $options;
+}
+
 $error = '';
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
@@ -25,24 +101,90 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if (empty($email) || empty($password) || empty($section)) {
         $error = 'Email, password, and section are required';
     } else {
-        // Demo hardcoded teacher (in production, check teachers table in database)
-        $valid_email = 'teacher@cams.edu.ph';
-        $valid_password = 'teacher123';
+        $authenticated = false;
 
-        if ($email === $valid_email && $password === $valid_password) {
-            $_SESSION['admin_id'] = 2;  // Different ID for teacher
-            $_SESSION['admin_email'] = $email;
-            $_SESSION['role'] = 'teacher';
-            $_SESSION['teacher_section'] = $section;
-            $_SESSION['login_time'] = time();
+        $usersTable = $mysqli->query("SHOW TABLES LIKE 'users'");
+        if ($usersTable && $usersTable->num_rows > 0) {
+            $stmt = $mysqli->prepare("SELECT id, email, password, section, status FROM users WHERE role = 'teacher' AND email = ? LIMIT 1");
+            if ($stmt) {
+                $stmt->bind_param("s", $email);
+                $stmt->execute();
+                $teacher = $stmt->get_result()->fetch_assoc();
 
+                if ($teacher && ($teacher['status'] ?? 'inactive') === 'active' && !empty($teacher['password']) && password_verify($password, $teacher['password'])) {
+                    $assignedSections = [];
+
+                    $mapStmt = $mysqli->prepare('SELECT s.name FROM teacher_sections ts JOIN sections s ON s.id = ts.section_id WHERE ts.teacher_id = ?');
+                    if ($mapStmt) {
+                        $teacherId = (int)$teacher['id'];
+                        $mapStmt->bind_param('i', $teacherId);
+                        $mapStmt->execute();
+                        $mapResult = $mapStmt->get_result();
+                        while ($mapRow = $mapResult->fetch_assoc()) {
+                            $name = trim((string)($mapRow['name'] ?? ''));
+                            if ($name !== '') {
+                                $assignedSections[] = $name;
+                            }
+                        }
+                        $mapStmt->close();
+                    }
+
+                    $assignedSection = trim((string)($teacher['section'] ?? ''));
+                    if ($assignedSection !== '' && !in_array($assignedSection, $assignedSections, true)) {
+                        $assignedSections[] = $assignedSection;
+                    }
+
+                    $sectionAllowed = empty($assignedSections);
+                    foreach ($assignedSections as $allowedSection) {
+                        if (strcasecmp($allowedSection, $section) === 0) {
+                            $sectionAllowed = true;
+                            break;
+                        }
+                    }
+
+                    if (!$sectionAllowed) {
+                        $error = 'You can only log in using one of your assigned sections.';
+                    } else {
+                        $_SESSION['admin_id'] = (int)$teacher['id'];
+                        $_SESSION['admin_email'] = (string)$teacher['email'];
+                        $_SESSION['role'] = 'teacher';
+                        $_SESSION['teacher_section'] = $section;
+                        $_SESSION['login_time'] = time();
+                        $authenticated = true;
+                    }
+                }
+            }
+        }
+
+        if (!$authenticated && $error === '') {
+            // Backward-compatible demo fallback
+            $valid_email = 'teacher@cams.edu.ph';
+            $valid_password = 'teacher123';
+
+            if ($email === $valid_email && $password === $valid_password) {
+                $_SESSION['admin_id'] = 2;
+                $_SESSION['admin_email'] = $email;
+                $_SESSION['role'] = 'teacher';
+                $_SESSION['teacher_section'] = $section;
+                $_SESSION['login_time'] = time();
+                $authenticated = true;
+            }
+        }
+
+        if ($authenticated) {
             header('Location: ../teacher/dashboard.php');
             exit;
-        } else {
+        }
+
+        if ($error === '') {
             $error = 'Invalid email or password';
         }
     }
 }
+
+$postedEmail = trim((string)($_POST['email'] ?? ''));
+$postedSection = trim((string)($_POST['section'] ?? ''));
+$sectionOptions = fetchLoginSectionOptions($mysqli, $postedEmail);
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -315,10 +457,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         </label>
                         <select class="form-control" id="section" name="section" required>
                             <option value="">Select your section...</option>
-                            <option value="A">Section A</option>
-                            <option value="B">Section B</option>
-                            <option value="C">Section C</option>
-                            <option value="D">Section D</option>
+                            <?php foreach ($sectionOptions as $option): ?>
+                                <option value="<?php echo htmlspecialchars((string)$option['value']); ?>" <?php echo strcasecmp($postedSection, (string)$option['value']) === 0 ? 'selected' : ''; ?>>
+                                    <?php echo htmlspecialchars((string)$option['label']); ?>
+                                </option>
+                            <?php endforeach; ?>
                         </select>
                     </div>
 
@@ -331,7 +474,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     <strong><i class="bi bi-info-circle"></i> Demo Credentials</strong>
                     <p>Email: teacher@cams.edu.ph</p>
                     <p>Password: teacher123</p>
-                    <p>Section: A, B, C, or D</p>
+                    <p>Section: Alpha, Beta, Charlie, or Delta</p>
                 </div>
             </div>
         </div>
@@ -340,3 +483,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
 </body>
 </html>
+
+<?php
+/*
+ * © 2026 TambyTech.
+ * This source code is proprietary and confidential.
+ * Any unauthorized use, copying, modification, distribution, or disclosure is strictly prohibited.
+ * All rights reserved.
+ */
+?>

@@ -34,6 +34,31 @@ $user_role = RoleHelper::getRole();
 $user_email = RoleHelper::getUserEmail();
 $user_section = RoleHelper::getTeacherSection();
 
+// Backfill missing teacher section for older sessions so teacher pages do not
+// raise notices when they read the session directly.
+if ($user_role === 'teacher' && (!isset($_SESSION['teacher_section']) || trim((string)$_SESSION['teacher_section']) === '')) {
+    if (isset($mysqli) && $mysqli instanceof mysqli) {
+        $teacherId = RoleHelper::getUserId();
+        if ($teacherId !== null) {
+            $stmt = $mysqli->prepare('SELECT section FROM users WHERE id = ? AND role = "teacher" LIMIT 1');
+            if ($stmt) {
+                $stmt->bind_param('i', $teacherId);
+                $stmt->execute();
+                $teacherRow = $stmt->get_result()->fetch_assoc();
+                $resolvedSection = trim((string)($teacherRow['section'] ?? ''));
+                if ($resolvedSection !== '') {
+                    $_SESSION['teacher_section'] = $resolvedSection;
+                    $user_section = $resolvedSection;
+                }
+            }
+        }
+    }
+
+    if (!isset($_SESSION['teacher_section'])) {
+        $_SESSION['teacher_section'] = '';
+    }
+}
+
 // Dynamic page title based on current file
 function getPageTitle() {
     $current_file = basename($_SERVER['PHP_SELF'], '.php');
@@ -43,12 +68,12 @@ function getPageTitle() {
         'students' => 'Students',
         'register' => 'Student Registration',
         'logs' => 'Attendance Logs',
-        'notifications' => 'Notifications',
         'settings' => 'Settings',
-        'users' => 'Users',
+        'users' => 'Teachers',
         'my_class' => 'My Class',
         'attendance_report' => 'Attendance Reports',
-        'profile' => 'Profile'
+        'profile' => 'Profile',
+        'my_account' => 'My Account'
     ];
     
     return $page_titles[$current_file] ?? 'CAMS';
@@ -63,11 +88,11 @@ function getPageSubtitle() {
         'students' => 'Manage student records and information',
         'register' => 'Add new students and enroll fingerprints',
         'logs' => 'View detailed attendance records',
-        'notifications' => 'System alerts and notifications',
         'settings' => 'System configuration and preferences',
-        'users' => 'Manage system users and permissions',
+        'users' => 'Manage teacher accounts',
         'my_class' => 'Your assigned students and attendance',
-        'attendance_report' => 'Generate and view attendance reports'
+        'attendance_report' => 'Generate and view attendance reports',
+        'my_account' => 'Manage your teacher account'
     ];
     
     return $page_subtitles[$current_file] ?? '';
@@ -86,18 +111,18 @@ function getPageSubtitle() {
     <script src="https://cdn.jsdelivr.net/npm/chart.js@3.7.0/dist/chart.min.js"></script>
     <style>
     :root {
-        --primary-dark: #1e40af;
-        --primary-blue: #2563eb;
-        --primary-light: #3b82f6;
-        --sidebar-gray: #1f2937;
-        --gray-dark: #111827;
-        --gray-medium: #6b7280;
-        --gray-light: #f9fafb;
-        --gray-lighter: #f3f4f6;
+        --primary-dark: #000000;
+        --primary-blue: #ff0000;
+        --primary-light: #ffffff;
+        --sidebar-gray: #000000;
+        --gray-dark: #000000;
+        --gray-medium: rgba(0, 0, 0, 0.7);
+        --gray-light: #ffffff;
+        --gray-lighter: #ffffff;
         --white: #ffffff;
-        --success: #10b981;
-        --danger: #ef4444;
-        --border: #e5e7eb;
+        --success: #ff0000;
+        --danger: #ff0000;
+        --border: #000000;
     }
 
     * {
@@ -113,11 +138,11 @@ function getPageSubtitle() {
     }
 
     body {
-        background: var(--gray-lighter);
+        background: #ffffff;
         font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
         margin: 0;
         padding: 0;
-        color: var(--gray-dark);
+        color: #000000;
         overflow-x: hidden;
     }
 
@@ -133,17 +158,18 @@ function getPageSubtitle() {
         display: flex;
         flex-direction: column;
         min-height: 100vh;
+        background: #ffffff;
     }
 
     /* Top Header Bar */
     .topbar {
         background: var(--white);
-        border-bottom: 1px solid var(--border);
+        border-bottom: 2px solid var(--border);
         padding: 12px 24px;
         display: flex;
         justify-content: space-between;
         align-items: center;
-        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+        box-shadow: 0 8px 24px rgba(0, 0, 0, 0.08);
         height: 70px;
         position: sticky;
         top: 0;
@@ -197,7 +223,8 @@ function getPageSubtitle() {
         width: 36px;
         height: 36px;
         border-radius: 8px;
-        background: linear-gradient(135deg, var(--primary-blue) 0%, var(--primary-dark) 100%);
+        background: #000000;
+        border: 1px solid #ff0000;
         display: flex;
         align-items: center;
         justify-content: center;
@@ -236,7 +263,277 @@ function getPageSubtitle() {
         overflow-y: auto;
         overflow-x: hidden;
         max-width: 100%;
-        background: var(--gray-lighter);
+        background: #ffffff;
+    }
+
+    /* Theme overrides for the red/black/white admin look */
+    .main-content .card,
+    .card {
+        background: #ffffff;
+        border: 1px solid #000000;
+        border-radius: 14px;
+        box-shadow: 0 10px 24px rgba(0, 0, 0, 0.08);
+        overflow: hidden;
+    }
+
+    .main-content .card:hover,
+    .card:hover {
+        box-shadow: 0 14px 32px rgba(0, 0, 0, 0.12);
+    }
+
+    .main-content .card-header,
+    .card-header {
+        background: #000000;
+        color: #ffffff;
+        border-bottom: 2px solid #ff0000;
+        padding: 16px 20px;
+    }
+
+    .main-content .card-body,
+    .card-body {
+        padding: 20px;
+        color: #000000;
+    }
+
+    .main-content .card-stat {
+        background: #ffffff;
+        border: 1px solid #000000;
+        border-radius: 14px;
+        box-shadow: 0 10px 24px rgba(0, 0, 0, 0.08);
+    }
+
+    .main-content .card-stat:hover {
+        transform: translateY(-4px);
+        box-shadow: 0 14px 32px rgba(0, 0, 0, 0.12);
+    }
+
+    .main-content .stat-label {
+        color: #000000;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        font-size: 0.78rem;
+        font-weight: 700;
+    }
+
+    .main-content .stat-number {
+        color: #000000;
+        font-size: 2rem;
+        font-weight: 800;
+    }
+
+    .main-content .stat-icon {
+        color: #ff0000 !important;
+        opacity: 0.18;
+    }
+
+    .main-content .card-header h5,
+    .main-content .card-header .mb-0 {
+        color: #ffffff;
+    }
+
+    .main-content .btn,
+    .btn {
+        border-radius: 10px;
+        font-weight: 600;
+        padding: 10px 16px;
+        box-shadow: none;
+    }
+
+    .main-content .btn-primary,
+    .btn-primary {
+        background: #ff0000;
+        border-color: #ff0000;
+        color: #ffffff;
+    }
+
+    .main-content .btn-primary:hover,
+    .btn-primary:hover {
+        background: #000000;
+        border-color: #000000;
+        color: #ffffff;
+    }
+
+    .main-content .btn-success,
+    .btn-success,
+    .main-content .btn-outline-success,
+    .btn-outline-success {
+        background: #ffffff;
+        border-color: #000000;
+        color: #000000;
+    }
+
+    .main-content .btn-success:hover,
+    .btn-success:hover,
+    .main-content .btn-outline-success:hover,
+    .btn-outline-success:hover {
+        background: #ff0000;
+        border-color: #ff0000;
+        color: #ffffff;
+    }
+
+    .main-content .btn-danger,
+    .btn-danger,
+    .main-content .btn-outline-danger,
+    .btn-outline-danger {
+        background: #ff0000;
+        border-color: #ff0000;
+        color: #ffffff;
+    }
+
+    .main-content .btn-danger:hover,
+    .btn-danger:hover,
+    .main-content .btn-outline-danger:hover,
+    .btn-outline-danger:hover {
+        background: #000000;
+        border-color: #000000;
+        color: #ffffff;
+    }
+
+    .main-content .btn-outline-primary,
+    .btn-outline-primary {
+        background: #ffffff;
+        border-color: #000000;
+        color: #000000;
+    }
+
+    .main-content .btn-outline-primary:hover,
+    .btn-outline-primary:hover {
+        background: #ff0000;
+        border-color: #ff0000;
+        color: #ffffff;
+    }
+
+    .main-content .form-control,
+    .main-content .form-select,
+    .form-control,
+    .form-select {
+        background: #ffffff;
+        border: 1px solid #000000;
+        border-radius: 10px;
+        color: #000000;
+        padding: 10px 14px;
+    }
+
+    .main-content .form-control:focus,
+    .main-content .form-select:focus,
+    .form-control:focus,
+    .form-select:focus {
+        border-color: #ff0000;
+        box-shadow: 0 0 0 3px rgba(255, 0, 0, 0.12);
+    }
+
+    .main-content .form-label,
+    .form-label {
+        font-weight: 700;
+        color: #000000;
+    }
+
+    .main-content .table,
+    .table {
+        margin: 0;
+        color: #000000;
+    }
+
+    .main-content .table thead th,
+    .table thead th {
+        background: #000000;
+        color: #ffffff;
+        border-bottom: 2px solid #ff0000;
+        font-size: 0.8rem;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        padding: 14px 16px;
+    }
+
+    .main-content .table tbody tr,
+    .table tbody tr {
+        border-bottom: 1px solid #000000;
+    }
+
+    .main-content .table tbody tr:hover,
+    .table tbody tr:hover {
+        background: rgba(255, 0, 0, 0.06);
+    }
+
+    .main-content .table tbody td,
+    .table tbody td {
+        padding: 14px 16px;
+        vertical-align: middle;
+    }
+
+    .main-content .table-light,
+    .table-light {
+        background: #000000 !important;
+        color: #ffffff !important;
+    }
+
+    .main-content .badge,
+    .badge {
+        border-radius: 999px;
+        padding: 6px 12px;
+        font-weight: 700;
+        letter-spacing: 0.02em;
+    }
+
+    .main-content .bg-success,
+    .bg-success {
+        background: #000000 !important;
+        color: #ffffff !important;
+    }
+
+    .main-content .bg-warning,
+    .bg-warning {
+        background: #ff0000 !important;
+        color: #ffffff !important;
+    }
+
+    .main-content .bg-danger,
+    .bg-danger {
+        background: #ffffff !important;
+        color: #000000 !important;
+        border: 1px solid #000000;
+    }
+
+    .main-content .bg-info,
+    .bg-info {
+        background: #ffffff !important;
+        color: #000000 !important;
+        border: 1px solid #ff0000;
+    }
+
+    .main-content .bg-secondary,
+    .bg-secondary {
+        background: #000000 !important;
+        color: #ffffff !important;
+    }
+
+    .main-content .alert,
+    .alert {
+        border: 1px solid #000000;
+        border-left: 6px solid #ff0000;
+        border-radius: 12px;
+        background: #ffffff;
+        color: #000000;
+    }
+
+    .main-content .alert-success,
+    .alert-success,
+    .main-content .alert-info,
+    .alert-info,
+    .main-content .alert-danger,
+    .alert-danger {
+        background: #ffffff;
+        color: #000000;
+    }
+
+    .main-content .page-title,
+    .page-title {
+        color: #000000;
+    }
+
+    .main-content .page-subtitle,
+    .page-subtitle {
+        color: rgba(0, 0, 0, 0.75);
     }
 
     /* Cards & Components */
@@ -534,7 +831,6 @@ function getPageSubtitle() {
                                 'students' => 'people',
                                 'register' => 'person-plus',
                                 'logs' => 'clock-history',
-                                'notifications' => 'bell',
                                 'settings' => 'gear',
                                 'users' => 'person-gear',
                                 'my_class' => 'mortarboard',
@@ -567,3 +863,12 @@ function getPageSubtitle() {
 
             <!-- Page Content Container -->
             <div class="main-content">
+
+<?php
+/*
+ * © 2026 TambyTech.
+ * This source code is proprietary and confidential.
+ * Any unauthorized use, copying, modification, distribution, or disclosure is strictly prohibited.
+ * All rights reserved.
+ */
+?>

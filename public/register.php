@@ -198,20 +198,6 @@ $success = '';
 
                 <form method="POST">
                     <div class="form-group">
-                        <label for="student_id" class="form-label">
-                            <i class="bi bi-card-text"></i> Student ID
-                        </label>
-                        <input
-                            type="text"
-                            class="form-control"
-                            id="student_id"
-                            name="student_id"
-                            placeholder="Enter your student ID"
-                            required
-                        >
-                    </div>
-
-                    <div class="form-group">
                         <label for="first_name" class="form-label">
                             <i class="bi bi-person"></i> First Name
                         </label>
@@ -235,20 +221,6 @@ $success = '';
                             id="last_name"
                             name="last_name"
                             placeholder="Your last name"
-                            required
-                        >
-                    </div>
-
-                    <div class="form-group">
-                        <label for="email" class="form-label">
-                            <i class="bi bi-envelope"></i> Email
-                        </label>
-                        <input
-                            type="email"
-                            class="form-control"
-                            id="email"
-                            name="email"
-                            placeholder="your.email@university.edu.ph"
                             required
                         >
                     </div>
@@ -283,3 +255,12 @@ $success = '';
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
 </body>
 </html>
+
+<?php
+/*
+ * © 2026 TambyTech.
+ * This source code is proprietary and confidential.
+ * Any unauthorized use, copying, modification, distribution, or disclosure is strictly prohibited.
+ * All rights reserved.
+ */
+?>
