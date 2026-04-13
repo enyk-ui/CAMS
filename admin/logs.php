@@ -225,6 +225,12 @@ function sortAttendanceLogs(array &$logs, string $sortBy, string $sortDir, array
         $aRemark = inferAttendanceRemark($a, $thresholds);
         $bRemark = inferAttendanceRemark($b, $thresholds);
 
+        $dateCmp = strcmp((string)($a['attendance_date'] ?? ''), (string)($b['attendance_date'] ?? ''));
+        if ($sortBy !== 'date' && $dateCmp !== 0) {
+            // Keep records grouped by date first, then apply secondary sorting within each date.
+            return $dateCmp;
+        }
+
         switch ($sortBy) {
             case 'name':
                 $cmp = strcasecmp($getName($a), $getName($b));
@@ -246,7 +252,7 @@ function sortAttendanceLogs(array &$logs, string $sortBy, string $sortDir, array
                 break;
             case 'date':
             default:
-                $cmp = strcmp((string)($a['attendance_date'] ?? ''), (string)($b['attendance_date'] ?? ''));
+                $cmp = $dateCmp;
                 if ($cmp === 0) {
                     $cmp = strcasecmp($getName($a), $getName($b));
                 }
@@ -657,9 +663,9 @@ if (!in_array($selected_export_name_format, ['full_name', 'last_name_first'], tr
     $selected_export_name_format = 'last_name_first';
 }
 
-$selected_export_scope = trim((string)($_GET['export_scope'] ?? 'filters'));
-if (!in_array($selected_export_scope, ['filters', 'all', 'school_year', 'section'], true)) {
-    $selected_export_scope = 'filters';
+$selected_export_scope = trim((string)($_GET['export_scope'] ?? 'all'));
+if (!in_array($selected_export_scope, ['all', 'school_year', 'section'], true)) {
+    $selected_export_scope = 'all';
 }
 $selected_export_period = trim((string)($_GET['export_period'] ?? 'daily'));
 if (!in_array($selected_export_period, ['daily', 'school_year'], true)) {
@@ -799,7 +805,7 @@ function labelExportScope(string $scope): string
         'all' => 'All Records',
         'school_year' => 'School Year',
         'section' => 'Section',
-        default => 'Current Filters',
+        default => 'All Records',
     };
 }
 
@@ -816,7 +822,7 @@ function labelSortBy(string $sortBy): string
 
 if ((string)($_GET['export'] ?? '') === 'csv') {
     $exportFormat = trim((string)($_GET['export'] ?? 'csv'));
-    $exportScope = trim((string)($_GET['export_scope'] ?? 'filters'));
+    $exportScope = trim((string)($_GET['export_scope'] ?? 'all'));
     $exportSchoolYear = trim((string)($_GET['export_school_year'] ?? ''));
     $exportYearLevel = trim((string)($_GET['export_year_level'] ?? ''));
     $exportSection = trim((string)($_GET['export_section'] ?? ''));
@@ -866,18 +872,19 @@ if ((string)($_GET['export'] ?? '') === 'csv') {
         $exportStartDate = (string)$syRange['start_date'];
         $exportEndDate = (string)$syRange['end_date'];
     }
-    $exportSectionFilter = $filter_section;
-    $exportYearFilter = $filter_year;
+    if (!in_array($exportScope, ['all', 'school_year', 'section'], true)) {
+        $exportScope = 'all';
+    }
 
-    if ($exportScope === 'all') {
-        $exportSectionFilter = '';
-        $exportYearFilter = '';
-    } elseif ($exportScope === 'school_year') {
+    $exportSectionFilter = '';
+    $exportYearFilter = '';
+
+    if ($exportScope === 'school_year') {
         $exportSectionFilter = '';
         $exportYearFilter = '';
     } elseif ($exportScope === 'section') {
         $exportSectionFilter = $exportSection;
-        $exportYearFilter = $exportYearLevel !== '' ? $exportYearLevel : $filter_year;
+        $exportYearFilter = $exportYearLevel;
     }
 
     if ($exportYearLevel !== '') {
@@ -1197,9 +1204,6 @@ $export_query = http_build_query([
                     <?php endif; ?>
 
                     <input type="hidden" name="school_year" value="<?php echo htmlspecialchars($selectedContextSchoolYear); ?>">
-                    <input type="hidden" name="student" value="<?php echo htmlspecialchars($filter_student); ?>">
-                    <input type="hidden" name="section" value="<?php echo htmlspecialchars($filter_section); ?>">
-                    <input type="hidden" name="status" value="<?php echo htmlspecialchars($filter_status); ?>">
 
                     <div class="row g-3">
                         <div class="col-md-6">
@@ -1207,7 +1211,6 @@ $export_query = http_build_query([
                             <div class="mb-3">
                                 <label for="export_scope" class="form-label">Export Scope</label>
                                 <select class="form-select" id="export_scope" name="export_scope">
-                                    <option value="filters" <?php echo $selected_export_scope === 'filters' ? 'selected' : ''; ?>>Current Filters</option>
                                     <option value="all" <?php echo $selected_export_scope === 'all' ? 'selected' : ''; ?>>All Records</option>
                                     <option value="school_year" <?php echo $selected_export_scope === 'school_year' ? 'selected' : ''; ?>>By School Year</option>
                                     <option value="section" <?php echo $selected_export_scope === 'section' ? 'selected' : ''; ?>>By Section (optional SY)</option>
@@ -1756,7 +1759,7 @@ document.addEventListener('DOMContentLoaded', function () {
     };
 
     const populateExportSections = (selectedSectionValue = '') => {
-        const mode = exportScope ? exportScope.value : 'filters';
+        const mode = exportScope ? exportScope.value : 'all';
         const needsYearLevel = mode === 'section';
         const selectedYearValue = needsYearLevel ? exportYearLevel.value : '';
         const sections = getSectionsForYear(exportSchoolYear ? exportSchoolYear.value : '', selectedYearValue);
