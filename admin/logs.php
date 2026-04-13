@@ -602,6 +602,8 @@ $legacy_date = normalizeDateValue($_GET['date'] ?? '', '');
 
 $filter_start_date = normalizeDateValue($_GET['start_date'] ?? '', $default_start_date);
 $filter_end_date = normalizeDateValue($_GET['end_date'] ?? '', $default_end_date);
+$originalFilterStartDate = $filter_start_date;
+$originalFilterEndDate = $filter_end_date;
 
 if (!isset($_GET['date']) && !isset($_GET['start_date']) && !isset($_GET['end_date'])) {
     $filter_start_date = $today;
@@ -618,11 +620,14 @@ if ($filter_start_date > $filter_end_date) {
     [$filter_start_date, $filter_end_date] = [$filter_end_date, $filter_start_date];
 }
 
+$dateOutOfRangeWarning = false;
 if ($filter_start_date < $activeSchoolYearStart) {
     $filter_start_date = $activeSchoolYearStart;
+    $dateOutOfRangeWarning = true;
 }
 if ($filter_end_date > $activeSchoolYearEnd) {
     $filter_end_date = $activeSchoolYearEnd;
+    $dateOutOfRangeWarning = true;
 }
 if ($filter_start_date > $filter_end_date) {
     $filter_start_date = $activeSchoolYearStart;
@@ -886,11 +891,42 @@ if ((string)($_GET['export'] ?? '') === 'csv') {
         [$exportStartDate, $exportEndDate] = [$exportEndDate, $exportStartDate];
     }
 
+    // Clamp export dates to active school year range
+    if ($exportStartDate < $activeSchoolYearStart) {
+        $exportStartDate = $activeSchoolYearStart;
+    }
+    if ($exportEndDate > $activeSchoolYearEnd) {
+        $exportEndDate = $activeSchoolYearEnd;
+    }
+
     $export_logs = fetchAttendanceLogs($mysqli, $exportStartDate, $exportEndDate, $filter_student, $exportSectionFilter, $exportYearFilter, null);
     if ($filter_status !== '') {
         $export_logs = array_values(array_filter($export_logs, function (array $row) use ($filter_status, $thresholds): bool {
             return inferAttendanceRemark($row, $thresholds) === $filter_status;
         }));
+    }
+
+    // Check if export returned no data and provide helpful feedback
+    if (empty($export_logs)) {
+        ob_end_clean();
+        $message = "No attendance records found for the selected date range ({$exportStartDate} to {$exportEndDate})";
+        if ($exportSectionFilter !== '') {
+            $message .= " and section filter.";
+        } else {
+            $message .= ".";
+        }
+        if ($filter_status !== '') {
+            $message .= " (Status filter: {$filter_status})";
+        }
+        header('Content-Type: application/json; charset=UTF-8');
+        http_response_code(200);
+        echo json_encode([
+            'status' => 'no_data',
+            'message' => $message,
+            'export_start_date' => $exportStartDate,
+            'export_end_date' => $exportEndDate,
+        ]);
+        exit;
     }
     usort($export_logs, function (array $a, array $b) use ($exportSortBy, $exportSortDir, $thresholds): int {
         $dateA = (string)($a['attendance_date'] ?? '');
@@ -968,13 +1004,24 @@ if ((string)($_GET['export'] ?? '') === 'csv') {
         $activeFilters[] = 'Remarks=' . $filter_status;
     }
 
+    // Check if "By Section" scope was selected but no section was specified
+    $scopeWarning = '';
+    if ($exportScope === 'section' && empty($exportSectionFilter)) {
+        $scopeWarning = 'WARNING: "By Section" scope selected but no section specified. Showing all records instead.';
+    }
+
     fputcsv($fp, ['Attendance Logs Export'], $delimiter);
     fputcsv($fp, ['School Year', $selectedContextSchoolYear !== '' ? $selectedContextSchoolYear : ((string)($activeSchoolYear['label'] ?? 'N/A'))], $delimiter);
+    fputcsv($fp, ['Year Level', $exportYearFilter !== '' ? $exportYearFilter : 'All'], $delimiter);
+    fputcsv($fp, ['Section', $exportSectionFilter !== '' ? $exportSectionFilter : 'All'], $delimiter);
     fputcsv($fp, ['Export Scope', labelExportScope($exportScope)], $delimiter);
     fputcsv($fp, ['Export Period', ucfirst($exportPeriod)], $delimiter);
     fputcsv($fp, ['Date Range', $exportStartDate . ' to ' . $exportEndDate], $delimiter);
     fputcsv($fp, ['Sort', 'Date priority, then ' . labelSortBy($exportSortBy) . ' (' . strtoupper($exportSortDir) . ')'], $delimiter);
     fputcsv($fp, ['Active Filters', empty($activeFilters) ? 'None' : implode(' | ', $activeFilters)], $delimiter);
+    if ($scopeWarning !== '') {
+        fputcsv($fp, ['WARNING', $scopeWarning], $delimiter);
+    }
     fputcsv($fp, [], $delimiter);
     if ($exportPeriod === 'school_year') {
         $dateHeaders = [];
@@ -1055,7 +1102,6 @@ $export_query = http_build_query([
     (<?php echo htmlspecialchars($activeSchoolYear['start_date'] ?? ''); ?> to <?php echo htmlspecialchars($activeSchoolYear['end_date'] ?? ''); ?>)
 </div>
 
-<!-- Filters -->
 <div class="card mb-3 filter-card">
     <div class="card-header d-flex flex-wrap justify-content-between align-items-center gap-3 py-2 px-3">
         <strong>Filters</strong>
@@ -1143,6 +1189,13 @@ $export_query = http_build_query([
             </div>
             <form method="GET">
                 <div class="modal-body">
+                    <?php if ($dateOutOfRangeWarning): ?>
+                    <div class="alert alert-warning mb-3" role="alert">
+                        <i class="bi bi-exclamation-triangle"></i>
+                        <strong>Date Adjustment:</strong> Your selected date(s) fall outside the active school year. The date range has been automatically adjusted to <strong><?php echo htmlspecialchars($filter_start_date); ?> to <?php echo htmlspecialchars($filter_end_date); ?></strong>.
+                    </div>
+                    <?php endif; ?>
+
                     <input type="hidden" name="school_year" value="<?php echo htmlspecialchars($selectedContextSchoolYear); ?>">
                     <input type="hidden" name="student" value="<?php echo htmlspecialchars($filter_student); ?>">
                     <input type="hidden" name="section" value="<?php echo htmlspecialchars($filter_section); ?>">
@@ -1863,6 +1916,60 @@ document.addEventListener('DOMContentLoaded', function () {
     populateExportSections(selectedExportSection);
     syncExportScope();
 });
+</script>
+
+<!-- Export Error Handler Script -->
+<script>
+(function() {
+    'use strict';
+    
+    const smartExportModalForm = document.querySelector('#smartExportModal form');
+    if (!smartExportModalForm) return;
+
+    smartExportModalForm.addEventListener('submit', async function(event) {
+        event.preventDefault();
+
+        try {
+            const formData = new FormData(smartExportModalForm);
+            const submitter = event.submitter;
+            if (submitter && submitter.name && !formData.has(submitter.name)) {
+                formData.append(submitter.name, submitter.value);
+            }
+            if (!formData.has('export')) {
+                formData.append('export', 'csv');
+            }
+
+            const params = new URLSearchParams();
+            for (const [key, value] of formData.entries()) {
+                params.append(key, String(value));
+            }
+
+            const requestUrl = new URL(window.location.href);
+            requestUrl.search = params.toString();
+
+            const response = await fetch(requestUrl.toString(), {
+                method: 'GET',
+                headers: {
+                    'X-Requested-With': 'XMLHttpRequest'
+                }
+            });
+
+            const contentType = (response.headers.get('content-type') || '').toLowerCase();
+            if (contentType.includes('application/json')) {
+                const data = await response.json();
+                if (data && data.status === 'no_data') {
+                    alert('No attendance records found.\n\n' + (data.message || 'Please change the date/filter and try again.'));
+                    return;
+                }
+            }
+
+            window.location.href = requestUrl.toString();
+        } catch (error) {
+            console.error('Export error:', error);
+            alert('Unable to export right now. Please try again.');
+        }
+    });
+})();
 </script>
 
 <?php require '../includes/footer.php'; /*

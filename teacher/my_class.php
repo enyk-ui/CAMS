@@ -470,7 +470,9 @@ $stmt->close();
                         </div>
                     <?php else: ?>
                         <div class="alert alert-info">
-                            <i class="bi bi-info-circle"></i> No attendance records found for the selected date and section.
+                            <i class="bi bi-info-circle"></i> 
+                            <strong>No attendance records found</strong> for <?php echo htmlspecialchars(date('M d, Y', strtotime($targetDate))); ?> in this section.
+                            <br><small class="text-muted">This may indicate: (1) No attendance data has been recorded for this date, or (2) No students are enrolled in this section for the selected time period.</small>
                         </div>
                     <?php endif; ?>
                 </div>

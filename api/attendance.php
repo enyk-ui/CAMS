@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 require_once __DIR__ . '/common.php';
 require_once __DIR__ . '/../config/db.php';
+require_once __DIR__ . '/../helpers/SchoolYearHelper.php';
 
 require_method('POST');
 
@@ -359,6 +360,7 @@ try {
     ensureAttendanceLogsTableSchema($mysqli);
     ensureAttendanceLogIdAutoIncrement($mysqli);
     ensureTeacherScheduleSchema($mysqli);
+    SchoolYearHelper::ensureSchoolYearSupport($mysqli);
 
     $fingerprintStmt = $mysqli->prepare('SELECT student_id FROM fingerprints WHERE sensor_id = ? LIMIT 1');
     $fingerprintStmt->bind_param('i', $sensorId);
@@ -388,6 +390,27 @@ try {
     $currentTime = date('H:i:s');
     $isPmSession = ((int)date('G')) >= 12;
     $weekday = (int)date('N');
+
+    $activeSchoolYear = SchoolYearHelper::getEffectiveSchoolYearRange($mysqli);
+    $schoolYearStart = trim((string)($activeSchoolYear['start_date'] ?? ''));
+    $schoolYearEnd = trim((string)($activeSchoolYear['end_date'] ?? ''));
+    if ($schoolYearStart !== '' && $schoolYearEnd !== '' && ($currentDate < $schoolYearStart || $currentDate > $schoolYearEnd)) {
+        api_response(200, [
+            'success' => false,
+            'message' => 'Attendance not allowed: outside school year range',
+            'student_id' => $studentId,
+            'student_name' => $studentName,
+            'section_id' => $sectionId > 0 ? $sectionId : null,
+            'school_year' => [
+                'label' => (string)($activeSchoolYear['label'] ?? ''),
+                'start_date' => $schoolYearStart,
+                'end_date' => $schoolYearEnd,
+            ],
+            'current_date' => $currentDate,
+            'sensor_id' => $sensorId,
+            'device_id' => $deviceId
+        ]);
+    }
 
     $schedule = getStudentSchedule($mysqli, $sectionId > 0 ? $sectionId : null, $weekday);
     $scanWindow = $schedule !== null ? resolveScanWindow($currentDate, $schedule) : null;
@@ -615,7 +638,7 @@ try {
 }
 
 /*
- * © 2026 TambyTech.
+ * ï¿½ 2026 TambyTech.
  * This source code is proprietary and confidential.
  * Any unauthorized use, copying, modification, distribution, or disclosure is strictly prohibited.
  * All rights reserved.

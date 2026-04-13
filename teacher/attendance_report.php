@@ -309,12 +309,17 @@ if ($filter_start_date > $filter_end_date) {
     [$filter_start_date, $filter_end_date] = [$filter_end_date, $filter_start_date];
 }
 
+// Track if dates are being clamped
+$dateOutOfRangeWarning = false;
+
 // Clamp to school year boundaries
 if ($filter_start_date < $syStartDate) {
     $filter_start_date = $syStartDate;
+    $dateOutOfRangeWarning = true;
 }
 if ($filter_end_date > $syEndDate) {
     $filter_end_date = $syEndDate;
+    $dateOutOfRangeWarning = true;
 }
 
 $filter_status = trim((string)($_GET['status'] ?? ''));
@@ -468,6 +473,16 @@ if (isset($_GET['export']) && (string)$_GET['export'] === 'csv') {
     $exportMonthLabel = date('F Y', strtotime($exportStartDate));
     $exportRangeLabel = $exportStartDate . ' to ' . $exportEndDate;
 
+    // Check if dates were adjusted due to school year boundaries
+    $dateWasAdjusted = false;
+    if ($exportPeriod === 'daily') {
+        if ($exportDailyMode === 'exact' && $exportDate !== $exportStartDate) {
+            $dateWasAdjusted = true;
+        } elseif ($exportDailyMode === 'range' && ($exportStartInput !== $exportStartDate || $exportEndInput !== $exportEndDate)) {
+            $dateWasAdjusted = true;
+        }
+    }
+
     while (ob_get_level() > 0) {
         ob_end_clean();
     }
@@ -537,6 +552,27 @@ if (isset($_GET['export']) && (string)$_GET['export'] === 'csv') {
         $exportData[] = $row;
     }
 
+    // Check if export returned no data and provide helpful feedback
+    if (empty($exportData)) {
+        while (ob_get_level() > 0) {
+            ob_end_clean();
+        }
+        $message = "No attendance records found for the selected date range ({$exportStartDate} to {$exportEndDate})";
+        if ($filter_status !== '') {
+            $message .= " with status filter: {$filter_status}";
+        }
+        $message .= ".";
+        header('Content-Type: application/json; charset=UTF-8');
+        http_response_code(200);
+        echo json_encode([
+            'status' => 'no_data',
+            'message' => $message,
+            'export_start_date' => $exportStartDate,
+            'export_end_date' => $exportEndDate,
+        ]);
+        exit;
+    }
+
     // Sort export data
     if ($exportSortBy === 'name') {
         usort($exportData, function($a, $b) {
@@ -590,6 +626,7 @@ if (isset($_GET['export']) && (string)$_GET['export'] === 'csv') {
         ];
     }
 
+    $exportSectionLabel = 'All';
     $activeFilters = [];
     if ($exportYearLevel !== '') {
         $activeFilters[] = 'Year=' . $exportYearLevel;
@@ -597,10 +634,14 @@ if (isset($_GET['export']) && (string)$_GET['export'] === 'csv') {
     if ($exportSectionId > 0) {
         foreach ($sectionCatalog as $catalogRow) {
             if ((int)$catalogRow['id'] === (int)$exportSectionId) {
-                $activeFilters[] = 'Section=' . (string)$catalogRow['label'];
+                $exportSectionLabel = (string)$catalogRow['label'];
+                $activeFilters[] = 'Section=' . $exportSectionLabel;
                 break;
             }
         }
+    }
+    if ($exportSectionId === 0 && !$hasSectionIdColumn && trim((string)$section) !== '') {
+        $exportSectionLabel = trim((string)$section);
     }
     if ($filter_status !== '') {
         $activeFilters[] = 'Remarks=' . $filter_status;
@@ -612,11 +653,16 @@ if (isset($_GET['export']) && (string)$_GET['export'] === 'csv') {
     $output = fopen('php://output', 'w');
     fputcsv($output, ['Attendance Logs Export']);
     fputcsv($output, ['School Year', $exportSchoolYearLabel !== '' ? $exportSchoolYearLabel : '-']);
+    fputcsv($output, ['Year Level', $exportYearLevel !== '' ? $exportYearLevel : 'All']);
+    fputcsv($output, ['Section', $exportSectionLabel]);
     fputcsv($output, ['Export Scope', $scopeLabel]);
     fputcsv($output, ['Export Period', ucwords(str_replace('_', ' ', $exportPeriod))]);
     fputcsv($output, ['Date Range', $exportRangeLabel]);
     fputcsv($output, ['Sorted By', ucfirst($exportSortBy)]);
     fputcsv($output, ['Active Filters', empty($activeFilters) ? 'None' : implode(' | ', $activeFilters)]);
+    if ($dateWasAdjusted) {
+        fputcsv($output, ['WARNING', 'Selected dates were adjusted to fit within the school year range (' . $syStartDate . ' to ' . $syEndDate . ')']);
+    }
     fputcsv($output, []);
 
     if ($exportPeriod === 'school_year') {
@@ -788,6 +834,13 @@ require '../includes/header.php';
         (<?php echo htmlspecialchars($syStartDate); ?> to <?php echo htmlspecialchars($syEndDate); ?>)
         | Scope: <strong><?php echo htmlspecialchars($scopeLabel); ?></strong>
     </div>
+
+    <?php if ($dateOutOfRangeWarning): ?>
+    <div class="alert alert-warning mb-3 py-2 small">
+        <i class="bi bi-exclamation-triangle"></i>
+        <strong>Date Adjustment:</strong> Your selected date(s) fall outside the active school year. The date range has been automatically adjusted to <strong><?php echo htmlspecialchars($filter_start_date); ?> to <?php echo htmlspecialchars($filter_end_date); ?></strong>.
+    </div>
+    <?php endif; ?>
 
     <div class="row mb-4">
         <div class="col-12">
@@ -1246,6 +1299,66 @@ document.addEventListener('DOMContentLoaded', function() {
 
     updatePeriodControls();
 });
+</script>
+
+<!-- Export Error Handler Script -->
+<script>
+(function() {
+    'use strict';
+    
+    const exportForm = document.querySelector('#exportModal form');
+    const exportCsvBtn = document.getElementById('teacherExportCsvBtn');
+    if (!exportForm) return;
+
+    exportForm.addEventListener('submit', async function(event) {
+        event.preventDefault();
+
+        // Respect validation guard from the main export script.
+        if (exportCsvBtn && exportCsvBtn.disabled) {
+            return;
+        }
+
+        try {
+            const formData = new FormData(exportForm);
+            const submitter = event.submitter;
+            if (submitter && submitter.name && !formData.has(submitter.name)) {
+                formData.append(submitter.name, submitter.value);
+            }
+            if (!formData.has('export')) {
+                formData.append('export', 'csv');
+            }
+
+            const params = new URLSearchParams();
+            for (const [key, value] of formData.entries()) {
+                params.append(key, String(value));
+            }
+
+            const requestUrl = new URL(window.location.href);
+            requestUrl.search = params.toString();
+
+            const response = await fetch(requestUrl.toString(), {
+                method: 'GET',
+                headers: {
+                    'X-Requested-With': 'XMLHttpRequest'
+                }
+            });
+
+            const contentType = (response.headers.get('content-type') || '').toLowerCase();
+            if (contentType.includes('application/json')) {
+                const data = await response.json();
+                if (data && data.status === 'no_data') {
+                    alert('No attendance records found.\n\n' + (data.message || 'Please change the date/filter and try again.'));
+                    return;
+                }
+            }
+
+            window.location.href = requestUrl.toString();
+        } catch (error) {
+            console.error('Export error:', error);
+            alert('Unable to export right now. Please try again.');
+        }
+    });
+})();
 </script>
 
 <?php require '../includes/footer.php'; /*

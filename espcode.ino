@@ -1649,7 +1649,7 @@ void loop() {
     int sensorId = getNextAvailableID();
     if (sensorId <= 0) {
       Serial.println("[ENROLL] No free sensor ID");
-      displayLCD("Not Found", "Try Again");
+      displayLCD("No Space", "Contact Admin");
       return;
     }
 
@@ -1660,18 +1660,18 @@ void loop() {
         ? lastEnrollFailureReason
         : "Scanner enrollment failed (image/model/store)";
       sendEnrollFailure(cmd.studentId, enrollFingerIndex, reason);
-      displayLCD("Not Found", "Try Again");
+      displayLCD("Enrollment Failed", "Try Again");
       return;
     }
 
     bool posted = sendEnrollResult(cmd.studentId, enrollFingerIndex, sensorId);
     if (posted) {
       lastEnrollCompleteMs = millis();
-      displayLCD("Saved!", "ID:" + String(sensorId));
+      displayLCD("Enrollment Done", "Success ✓");
 
        advanceToNextFinger(cmd.studentId, enrollFingerIndex);
     } else {
-      displayLCD("Not Found", "Try Again");
+      displayLCD("Upload Failed", "Try Again");
     }
 
     return;
