@@ -11,8 +11,18 @@ require_once '../helpers/SchoolYearHelper.php';
 require '../includes/header.php';
 
 SchoolYearHelper::ensureSchoolYearSupport($mysqli);
-$activeSchoolYear = SchoolYearHelper::getEffectiveSchoolYearRange($mysqli);
 $schoolYears = SchoolYearHelper::getAllSchoolYears($mysqli);
+$selectedContextSchoolYear = trim((string)($_GET['school_year'] ?? SchoolYearHelper::resolveSelectedSchoolYearLabel($mysqli)));
+if ($selectedContextSchoolYear !== '') {
+    SchoolYearHelper::setSelectedSchoolYearLabel($selectedContextSchoolYear);
+}
+$activeSchoolYear = SchoolYearHelper::getEffectiveSchoolYearRange($mysqli);
+foreach ($schoolYears as $sy) {
+    if ((string)($sy['label'] ?? '') === $selectedContextSchoolYear) {
+        $activeSchoolYear = $sy;
+        break;
+    }
+}
 
 function normalizeDateValue($value, $fallback)
 {
@@ -288,7 +298,7 @@ function fetchYears(mysqli $mysqli): array
 function buildTeacherSectionMapBySchoolYear(mysqli $mysqli): array
 {
     $map = [];
-    if (!tableExists($mysqli, 'users')) {
+        if (!tableExists($mysqli, 'users') || !columnExists($mysqli, 'users', 'role')) {
         return $map;
     }
 
@@ -344,7 +354,7 @@ function buildTeacherSectionMapBySchoolYear(mysqli $mysqli): array
 function getAttendanceLogsContext($mysqli)
 {
     if (!tableExists($mysqli, 'attendance_logs')) {
-        return null;
+            return [];
     }
 
     $idColumn = null;
@@ -395,78 +405,21 @@ function buildDateRange(string $startDate, string $endDate): array
 function fetchAttendanceLogs($mysqli, $startDate, $endDate, $studentFilter = '', $sectionFilter = '', $yearFilter = '', $limit = 1000)
 {
     if (tableExists($mysqli, 'attendance') && tableExists($mysqli, 'students')) {
-        $studentsTypes = '';
-        $studentsParams = [];
         $middleInitialExpr = columnExists($mysqli, 'students', 'middle_initial') ? 'COALESCE(s.middle_initial, "")' : '""';
         $extensionExpr = columnExists($mysqli, 'students', 'extension') ? 'COALESCE(s.extension, "")' : '""';
         $sectionExpr = columnExists($mysqli, 'students', 'section') ? 'COALESCE(s.section, "")' : '""';
         $yearExpr = columnExists($mysqli, 'students', 'year') ? 'COALESCE(CAST(s.year AS CHAR), "")' : '""';
-
-        $studentsSql = "
+        $attendanceTypes = 'ss';
+        $attendanceParams = [$startDate, $endDate];
+        $attendanceSql = "
             SELECT
-                s.id AS student_pk,
+                CAST(s.id AS CHAR) AS student_id,
                 s.first_name,
                 s.last_name,
                 {$middleInitialExpr} AS middle_initial,
                 {$extensionExpr} AS extension,
                 {$sectionExpr} AS section,
-                {$yearExpr} AS year_level
-            FROM students s
-            WHERE 1=1
-        ";
-
-        if ($studentFilter !== '') {
-            $studentsSql .= " AND (s.first_name LIKE ? OR s.last_name LIKE ?)";
-            $studentLike = '%' . $studentFilter . '%';
-            $studentsParams[] = $studentLike;
-            $studentsParams[] = $studentLike;
-            $studentsTypes .= 'ss';
-        }
-
-        if ($sectionFilter !== '' && columnExists($mysqli, 'students', 'section')) {
-            $studentsSql .= " AND s.section = ?";
-            $studentsParams[] = $sectionFilter;
-            $studentsTypes .= 's';
-        }
-
-        if ($yearFilter !== '' && columnExists($mysqli, 'students', 'year')) {
-            $studentsSql .= " AND CAST(s.year AS CHAR) = ?";
-            $studentsParams[] = $yearFilter;
-            $studentsTypes .= 's';
-        }
-
-        $studentsSql .= " ORDER BY s.last_name ASC, s.first_name ASC, s.id ASC";
-
-        $studentsStmt = $mysqli->prepare($studentsSql);
-        if (!$studentsStmt) {
-            return [];
-        }
-
-        if ($studentsTypes !== '') {
-            $studentBind = [$studentsTypes];
-            foreach ($studentsParams as $index => $value) {
-                $studentBind[] = &$studentsParams[$index];
-            }
-            call_user_func_array([$studentsStmt, 'bind_param'], $studentBind);
-        }
-
-        $studentsStmt->execute();
-        $studentsResult = $studentsStmt->get_result();
-        $students = [];
-        while ($studentRow = $studentsResult->fetch_assoc()) {
-            $students[] = $studentRow;
-        }
-        $studentsStmt->close();
-
-        if (empty($students)) {
-            return [];
-        }
-
-        $attendanceTypes = 'ss';
-        $attendanceParams = [$startDate, $endDate];
-        $attendanceSql = "
-            SELECT
-                s.id AS student_pk,
+                {$yearExpr} AS year_level,
                 a.attendance_date,
                 a.time_in_am,
                 a.time_out_am,
@@ -498,7 +451,11 @@ function fetchAttendanceLogs($mysqli, $startDate, $endDate, $studentFilter = '',
             $attendanceTypes .= 's';
         }
 
-        $attendanceSql .= " ORDER BY a.attendance_date ASC";
+        $attendanceSql .= " ORDER BY a.attendance_date ASC, s.last_name ASC, s.first_name ASC";
+        if ($limit !== null) {
+            $attendanceSql .= " LIMIT " . (int)$limit;
+        }
+
         $attendanceStmt = $mysqli->prepare($attendanceSql);
         if (!$attendanceStmt) {
             return [];
@@ -512,45 +469,11 @@ function fetchAttendanceLogs($mysqli, $startDate, $endDate, $studentFilter = '',
         $attendanceStmt->execute();
         $attendanceResult = $attendanceStmt->get_result();
 
-        $attendanceMap = [];
+        $logs = [];
         while ($attendanceRow = $attendanceResult->fetch_assoc()) {
-            $studentPk = (string)($attendanceRow['student_pk'] ?? '');
-            $attendanceDate = (string)($attendanceRow['attendance_date'] ?? '');
-            if ($studentPk === '' || $attendanceDate === '') {
-                continue;
-            }
-            $attendanceMap[$studentPk][$attendanceDate] = $attendanceRow;
+            $logs[] = $attendanceRow;
         }
         $attendanceStmt->close();
-
-        $dateList = buildDateRange($startDate, $endDate);
-        $logs = [];
-        foreach ($dateList as $attendanceDate) {
-            foreach ($students as $student) {
-                $studentPk = (string)($student['student_pk'] ?? '');
-                $existing = $attendanceMap[$studentPk][$attendanceDate] ?? null;
-
-                $logs[] = [
-                    'student_id' => (string)($student['student_pk'] ?? ''),
-                    'first_name' => $student['first_name'] ?? '',
-                    'last_name' => $student['last_name'] ?? '',
-                    'middle_initial' => $student['middle_initial'] ?? '',
-                    'extension' => $student['extension'] ?? '',
-                    'section' => $student['section'] ?? '',
-                    'year_level' => $student['year_level'] ?? '',
-                    'attendance_date' => $attendanceDate,
-                    'time_in_am' => $existing['time_in_am'] ?? null,
-                    'time_out_am' => $existing['time_out_am'] ?? null,
-                    'time_in_pm' => $existing['time_in_pm'] ?? null,
-                    'time_out_pm' => $existing['time_out_pm'] ?? null,
-                    'status' => $existing['status'] ?? 'absent',
-                ];
-            }
-        }
-
-        if ($limit !== null) {
-            $logs = array_slice($logs, 0, (int)$limit);
-        }
 
         return $logs;
     } else {
@@ -733,18 +656,20 @@ $selected_export_scope = trim((string)($_GET['export_scope'] ?? 'filters'));
 if (!in_array($selected_export_scope, ['filters', 'all', 'school_year', 'section'], true)) {
     $selected_export_scope = 'filters';
 }
+$selected_export_period = trim((string)($_GET['export_period'] ?? 'daily'));
+if (!in_array($selected_export_period, ['daily', 'school_year'], true)) {
+    $selected_export_period = 'daily';
+}
+$selected_daily_mode = trim((string)($_GET['daily_mode'] ?? 'exact'));
+if (!in_array($selected_daily_mode, ['exact', 'range'], true)) {
+    $selected_daily_mode = 'exact';
+}
+$selected_export_date = normalizeDateValue($_GET['export_date'] ?? $headerSelectedDate, $headerSelectedDate);
+$selected_export_start_date = normalizeDateValue($_GET['export_start_date'] ?? $filter_start_date, $filter_start_date);
+$selected_export_end_date = normalizeDateValue($_GET['export_end_date'] ?? $filter_end_date, $filter_end_date);
 $selected_export_school_year = trim((string)($_GET['export_school_year'] ?? ''));
 $selected_export_year_level = trim((string)($_GET['export_year_level'] ?? ''));
 $selected_export_section = trim((string)($_GET['export_section'] ?? ''));
-$selected_export_semester = (int)($_GET['semester'] ?? (((int)date('n') >= 7) ? 2 : 1));
-if (!in_array($selected_export_semester, [1, 2], true)) {
-    $selected_export_semester = 1;
-}
-
-$selected_export_month = (int)($_GET['month'] ?? (int)date('n'));
-if ($selected_export_month < 1 || $selected_export_month > 12) {
-    $selected_export_month = (int)date('n');
-}
 
 $thresholds = getAttendanceThresholds($mysqli);
 $sections = fetchSections($mysqli);
@@ -753,9 +678,10 @@ $teacherSectionMapBySchoolYear = buildTeacherSectionMapBySchoolYear($mysqli);
 
 function buildSortQuery(array $overrides = []): string
 {
-    global $filter_start_date, $filter_end_date, $filter_student, $filter_year, $filter_status, $filter_section, $sort_by, $sort_dir;
+    global $selectedContextSchoolYear, $filter_start_date, $filter_end_date, $filter_student, $filter_year, $filter_status, $filter_section, $sort_by, $sort_dir;
 
     $query = [
+        'school_year' => $selectedContextSchoolYear,
         'start_date' => $filter_start_date,
         'end_date' => $filter_end_date,
         'student' => $filter_student,
@@ -883,13 +809,23 @@ function labelSortBy(string $sortBy): string
     };
 }
 
-if (($_GET['export'] ?? '') === 'csv') {
+if ((string)($_GET['export'] ?? '') === 'csv') {
+    $exportFormat = trim((string)($_GET['export'] ?? 'csv'));
     $exportScope = trim((string)($_GET['export_scope'] ?? 'filters'));
     $exportSchoolYear = trim((string)($_GET['export_school_year'] ?? ''));
     $exportYearLevel = trim((string)($_GET['export_year_level'] ?? ''));
     $exportSection = trim((string)($_GET['export_section'] ?? ''));
-    $exportSemester = isset($_GET['semester']) ? (int)$_GET['semester'] : 1;
-    $exportMonth = isset($_GET['month']) ? (int)$_GET['month'] : (int)date('n');
+    $exportPeriod = trim((string)($_GET['export_period'] ?? 'daily'));
+    if (!in_array($exportPeriod, ['daily', 'school_year'], true)) {
+        $exportPeriod = 'daily';
+    }
+    $exportDailyMode = trim((string)($_GET['daily_mode'] ?? 'exact'));
+    if (!in_array($exportDailyMode, ['exact', 'range'], true)) {
+        $exportDailyMode = 'exact';
+    }
+    $exportDate = normalizeDateValue($_GET['export_date'] ?? $headerSelectedDate, $headerSelectedDate);
+    $exportStartInput = normalizeDateValue($_GET['export_start_date'] ?? $filter_start_date, $filter_start_date);
+    $exportEndInput = normalizeDateValue($_GET['export_end_date'] ?? $filter_end_date, $filter_end_date);
     $exportSortBy = trim((string)($_GET['export_sort_by'] ?? 'date'));
     $exportSortDir = strtolower(trim((string)($_GET['export_sort_dir'] ?? $sort_dir))) === 'asc' ? 'asc' : 'desc';
     $exportNameFormat = trim((string)($_GET['export_name_format'] ?? 'last_name_first'));
@@ -904,20 +840,27 @@ if (($_GET['export'] ?? '') === 'csv') {
         $exportNameFormat = 'last_name_first';
     }
 
-    if (!in_array($exportSemester, [1, 2], true)) {
-        $exportSemester = 1;
+    $exportStartDate = $exportDate;
+    $exportEndDate = $exportDate;
+    if ($exportPeriod === 'daily') {
+        if ($exportDailyMode === 'range') {
+            $exportStartDate = $exportStartInput;
+            $exportEndDate = $exportEndInput;
+            if ($exportStartDate > $exportEndDate) {
+                [$exportStartDate, $exportEndDate] = [$exportEndDate, $exportStartDate];
+            }
+        }
+    } else {
+        $syRange = getSchoolYearDateRangeByLabel($mysqli, $exportSchoolYear);
+        if (!$syRange) {
+            $syRange = [
+                'start_date' => $activeSchoolYearStart,
+                'end_date' => $activeSchoolYearEnd,
+            ];
+        }
+        $exportStartDate = (string)$syRange['start_date'];
+        $exportEndDate = (string)$syRange['end_date'];
     }
-    if ($exportMonth < 1 || $exportMonth > 12) {
-        $exportMonth = (int)date('n');
-    }
-    $semesterMonths = $exportSemester === 1 ? range(1, 6) : range(7, 12);
-    if (!in_array($exportMonth, $semesterMonths, true)) {
-        $exportMonth = $semesterMonths[0];
-    }
-
-    $exportYear = (int)date('Y');
-    $exportStartDate = sprintf('%04d-%02d-01', $exportYear, $exportMonth);
-    $exportEndDate = date('Y-m-t', strtotime($exportStartDate));
     $exportSectionFilter = $filter_section;
     $exportYearFilter = $filter_year;
 
@@ -930,6 +873,13 @@ if (($_GET['export'] ?? '') === 'csv') {
     } elseif ($exportScope === 'section') {
         $exportSectionFilter = $exportSection;
         $exportYearFilter = $exportYearLevel !== '' ? $exportYearLevel : $filter_year;
+    }
+
+    if ($exportYearLevel !== '') {
+        $exportYearFilter = $exportYearLevel;
+    }
+    if ($exportSection !== '') {
+        $exportSectionFilter = $exportSection;
     }
 
     if ($exportStartDate > $exportEndDate) {
@@ -993,9 +943,11 @@ if (($_GET['export'] ?? '') === 'csv') {
         ob_end_clean();
     }
 
+    $fileBase = 'attendance_logs_' . $exportStartDate . '_to_' . $exportEndDate;
     header('Content-Type: text/csv; charset=UTF-8');
-    header('Content-Disposition: attachment; filename="attendance_logs_' . $exportStartDate . '_to_' . $exportEndDate . '.csv"');
+    header('Content-Disposition: attachment; filename="' . $fileBase . '.csv"');
 
+    $delimiter = ',';
     $fp = fopen('php://output', 'w');
     fwrite($fp, "\xEF\xBB\xBF");
 
@@ -1016,26 +968,60 @@ if (($_GET['export'] ?? '') === 'csv') {
         $activeFilters[] = 'Remarks=' . $filter_status;
     }
 
-    fputcsv($fp, ['Attendance Logs Export']);
-    fputcsv($fp, ['Export Scope', labelExportScope($exportScope)]);
-    fputcsv($fp, ['Date Range', $exportStartDate . ' to ' . $exportEndDate]);
-    fputcsv($fp, ['Sort', 'Date priority, then ' . labelSortBy($exportSortBy) . ' (' . strtoupper($exportSortDir) . ')']);
-    fputcsv($fp, ['Active Filters', empty($activeFilters) ? 'None' : implode(' | ', $activeFilters)]);
-    fputcsv($fp, []);
-    fputcsv($fp, ['Date', 'Name', 'Year', 'Section', 'Time In (AM)', 'Time Out (AM)', 'Time In (PM)', 'Time Out (PM)', 'Remarks']);
+    fputcsv($fp, ['Attendance Logs Export'], $delimiter);
+    fputcsv($fp, ['School Year', $selectedContextSchoolYear !== '' ? $selectedContextSchoolYear : ((string)($activeSchoolYear['label'] ?? 'N/A'))], $delimiter);
+    fputcsv($fp, ['Export Scope', labelExportScope($exportScope)], $delimiter);
+    fputcsv($fp, ['Export Period', ucfirst($exportPeriod)], $delimiter);
+    fputcsv($fp, ['Date Range', $exportStartDate . ' to ' . $exportEndDate], $delimiter);
+    fputcsv($fp, ['Sort', 'Date priority, then ' . labelSortBy($exportSortBy) . ' (' . strtoupper($exportSortDir) . ')'], $delimiter);
+    fputcsv($fp, ['Active Filters', empty($activeFilters) ? 'None' : implode(' | ', $activeFilters)], $delimiter);
+    fputcsv($fp, [], $delimiter);
+    if ($exportPeriod === 'school_year') {
+        $dateHeaders = [];
+        $ts = strtotime($exportStartDate);
+        $endTs = strtotime($exportEndDate);
+        while ($ts !== false && $endTs !== false && $ts <= $endTs) {
+            $dateHeaders[] = date('Y-m-d', $ts);
+            $ts = strtotime('+1 day', $ts);
+        }
 
-    foreach ($export_logs as $log) {
-        fputcsv($fp, [
-            !empty($log['attendance_date']) ? date('n/j/Y', strtotime((string)$log['attendance_date'])) : '-',
-            formatAttendanceExportName($log, $exportNameFormat),
-            (string)($log['year_level'] ?? '-'),
-            (string)($log['section'] ?? '-'),
-            $log['time_in_am'] ?? '-',
-            $log['time_out_am'] ?? '-',
-            $log['time_in_pm'] ?? '-',
-            $log['time_out_pm'] ?? '-',
-            getRemarksText($log, $thresholds)
-        ]);
+        fputcsv($fp, array_merge(['#', 'Name'], $dateHeaders), $delimiter);
+
+        $byStudent = [];
+        foreach ($export_logs as $log) {
+            $studentKey = (string)($log['student_id'] ?? '0');
+            $studentName = formatAttendanceExportName($log, $exportNameFormat);
+            $date = (string)($log['attendance_date'] ?? '');
+            if (!isset($byStudent[$studentKey])) {
+                $byStudent[$studentKey] = ['name' => $studentName, 'dates' => []];
+            }
+            if ($date !== '') {
+                $byStudent[$studentKey]['dates'][$date] = strtolower((string)getRemarksText($log, $thresholds));
+            }
+        }
+
+        $rowNo = 1;
+        foreach ($byStudent as $studentRow) {
+            $line = [$rowNo++, $studentRow['name']];
+            foreach ($dateHeaders as $dateHeader) {
+                $line[] = (string)($studentRow['dates'][$dateHeader] ?? 'absent');
+            }
+            fputcsv($fp, $line, $delimiter);
+        }
+    } else {
+        fputcsv($fp, ['#', 'Date', 'Name', 'Time In', 'Time Out'], $delimiter);
+        $rowNo = 1;
+        foreach ($export_logs as $log) {
+            $timeIn = (string)(($log['time_in_am'] ?? '') !== '' ? $log['time_in_am'] : ($log['time_in_pm'] ?? ''));
+            $timeOut = (string)(($log['time_out_am'] ?? '') !== '' ? $log['time_out_am'] : ($log['time_out_pm'] ?? ''));
+            fputcsv($fp, [
+                $rowNo++,
+                !empty($log['attendance_date']) ? date('Y-m-d', strtotime((string)$log['attendance_date'])) : '-',
+                formatAttendanceExportName($log, $exportNameFormat),
+                $timeIn,
+                $timeOut,
+            ], $delimiter);
+        }
     }
 
     fclose($fp);
@@ -1051,6 +1037,7 @@ if ($filter_status !== '') {
 sortAttendanceLogs($logs, $sort_by, $sort_dir, $thresholds);
 
 $export_query = http_build_query([
+    'school_year' => $selectedContextSchoolYear,
     'start_date' => $filter_start_date,
     'end_date' => $filter_end_date,
     'student' => $filter_student,
@@ -1075,6 +1062,17 @@ $export_query = http_build_query([
     </div>
     <div class="card-body py-2 px-3">
         <form id="attendance-filters" method="GET" class="row g-2 align-items-end">
+            <div class="col-xl-2 col-lg-3 col-md-6">
+                <label for="school_year" class="form-label">School Year</label>
+                <select class="form-select" id="school_year" name="school_year">
+                    <?php foreach ($schoolYears as $sy): ?>
+                        <?php $syLabel = (string)($sy['label'] ?? ''); ?>
+                        <option value="<?php echo htmlspecialchars($syLabel); ?>" <?php echo $selectedContextSchoolYear === $syLabel ? 'selected' : ''; ?>>
+                            <?php echo htmlspecialchars($syLabel); ?>
+                        </option>
+                    <?php endforeach; ?>
+                </select>
+            </div>
             <div class="col-xl-2 col-lg-3 col-md-6">
                 <label for="start_date" class="form-label">Start Date</label>
                 <input type="date" class="form-control" id="start_date" name="start_date" value="<?php echo htmlspecialchars($filter_start_date); ?>" min="<?php echo htmlspecialchars($activeSchoolYearStart); ?>" max="<?php echo htmlspecialchars($activeSchoolYearEnd); ?>">
@@ -1145,7 +1143,7 @@ $export_query = http_build_query([
             </div>
             <form method="GET">
                 <div class="modal-body">
-                    <input type="hidden" name="export" value="csv">
+                    <input type="hidden" name="school_year" value="<?php echo htmlspecialchars($selectedContextSchoolYear); ?>">
                     <input type="hidden" name="student" value="<?php echo htmlspecialchars($filter_student); ?>">
                     <input type="hidden" name="section" value="<?php echo htmlspecialchars($filter_section); ?>">
                     <input type="hidden" name="status" value="<?php echo htmlspecialchars($filter_status); ?>">
@@ -1163,21 +1161,57 @@ $export_query = http_build_query([
                                 </select>
                             </div>
 
-                            <div class="mb-3" id="exportSchoolYearGroup" style="display:none;">
-                                <label for="export_school_year" class="form-label">School Year</label>
-                                <select class="form-select" id="export_school_year" name="export_school_year">
-                                    <option value="">Select school year</option>
-                                    <?php foreach ($schoolYears as $sy): ?>
-                                        <option value="<?php echo htmlspecialchars((string)$sy['label']); ?>" <?php echo $selected_export_school_year === (string)$sy['label'] ? 'selected' : ''; ?>><?php echo htmlspecialchars((string)$sy['label']); ?></option>
-                                    <?php endforeach; ?>
-                                </select>
+                            <div class="row g-2">
+                                <div class="col-md-6 mb-3">
+                                    <label for="export_period" class="form-label">Export Period</label>
+                                    <select class="form-select" id="export_period" name="export_period">
+                                        <option value="daily" <?php echo $selected_export_period === 'daily' ? 'selected' : ''; ?>>Daily</option>
+                                        <option value="school_year" <?php echo $selected_export_period === 'school_year' ? 'selected' : ''; ?>>School Year</option>
+                                    </select>
+                                </div>
+
+                                <div class="col-md-6 mb-3" id="dailyModeGroup">
+                                    <label for="daily_mode" class="form-label">Daily Mode</label>
+                                    <select class="form-select" id="daily_mode" name="daily_mode">
+                                        <option value="exact" <?php echo $selected_daily_mode === 'exact' ? 'selected' : ''; ?>>Exact Date</option>
+                                        <option value="range" <?php echo $selected_daily_mode === 'range' ? 'selected' : ''; ?>>Date Range</option>
+                                    </select>
+                                </div>
                             </div>
 
-                            <div class="mb-3" id="exportYearGroup" style="display:none;">
-                                <label for="export_year_level" class="form-label">Year</label>
-                                <select class="form-select" id="export_year_level" name="export_year_level">
-                                    <option value="">Select year</option>
-                                </select>
+                            <div class="mb-3" id="exportDateGroup">
+                                <label for="export_date" class="form-label">Exact Date</label>
+                                <input type="date" class="form-control" id="export_date" name="export_date" value="<?php echo htmlspecialchars($selected_export_date); ?>">
+                            </div>
+
+                            <div class="row g-2 mb-3" id="exportDateRangeGroup">
+                                <div class="col-6">
+                                    <label for="export_start_date" class="form-label">Start Date</label>
+                                    <input type="date" class="form-control" id="export_start_date" name="export_start_date" value="<?php echo htmlspecialchars($selected_export_start_date); ?>">
+                                </div>
+                                <div class="col-6">
+                                    <label for="export_end_date" class="form-label">End Date</label>
+                                    <input type="date" class="form-control" id="export_end_date" name="export_end_date" value="<?php echo htmlspecialchars($selected_export_end_date); ?>">
+                                </div>
+                            </div>
+
+                            <div class="row g-2">
+                                <div class="col-md-6 mb-3" id="exportSchoolYearGroup" style="display:none;">
+                                    <label for="export_school_year" class="form-label">School Year</label>
+                                    <select class="form-select" id="export_school_year" name="export_school_year">
+                                        <option value="">Select school year</option>
+                                        <?php foreach ($schoolYears as $sy): ?>
+                                            <option value="<?php echo htmlspecialchars((string)$sy['label']); ?>" <?php echo $selected_export_school_year === (string)$sy['label'] ? 'selected' : ''; ?>><?php echo htmlspecialchars((string)$sy['label']); ?></option>
+                                        <?php endforeach; ?>
+                                    </select>
+                                </div>
+
+                                <div class="col-md-6 mb-3" id="exportYearGroup" style="display:none;">
+                                    <label for="export_year_level" class="form-label">Year Level</label>
+                                    <select class="form-select" id="export_year_level" name="export_year_level">
+                                        <option value="">Select year</option>
+                                    </select>
+                                </div>
                             </div>
 
                             <div class="mb-0" id="exportSectionGroup" style="display:none;">
@@ -1187,25 +1221,6 @@ $export_query = http_build_query([
                                 </select>
                             </div>
 
-                            <div class="row g-2 mt-1">
-                                <div class="col-6">
-                                    <label for="semester" class="form-label">Semester</label>
-                                    <select class="form-select" id="semester" name="semester">
-                                        <option value="1" <?php echo $selected_export_semester === 1 ? 'selected' : ''; ?>>Semester 1 (Jan-Jun)</option>
-                                        <option value="2" <?php echo $selected_export_semester === 2 ? 'selected' : ''; ?>>Semester 2 (Jul-Dec)</option>
-                                    </select>
-                                </div>
-                                <div class="col-6">
-                                    <label for="month" class="form-label">Month</label>
-                                    <select class="form-select" id="month" name="month">
-                                        <?php for ($m = 1; $m <= 12; $m++): ?>
-                                            <option value="<?php echo $m; ?>" <?php echo $selected_export_month === $m ? 'selected' : ''; ?>>
-                                                <?php echo htmlspecialchars(date('F', mktime(0, 0, 0, $m, 1))); ?>
-                                            </option>
-                                        <?php endfor; ?>
-                                    </select>
-                                </div>
-                            </div>
                         </div>
 
                         <div class="col-md-6" id="exportSortingColumn" style="display:none;">
@@ -1248,8 +1263,9 @@ $export_query = http_build_query([
                 </div>
                 <div class="modal-footer">
                     <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
-                    <button type="submit" class="btn btn-success"><i class="bi bi-download"></i> Export</button>
+                    <button type="submit" class="btn btn-success" id="exportCsvBtn" name="export" value="csv"><i class="bi bi-filetype-csv"></i> Export CSV</button>
                 </div>
+                <small class="text-danger d-block px-3 pb-2" id="exportValidationHint" style="display:none;"></small>
             </form>
         </div>
     </div>
@@ -1263,6 +1279,7 @@ $export_query = http_build_query([
                 </span></h5>
         <div class="records-header-tools d-flex align-items-center gap-2 flex-wrap justify-content-end">
             <form id="headerDateFilter" method="GET" class="d-flex align-items-center gap-1 mb-0">
+                <input type="hidden" name="school_year" value="<?php echo htmlspecialchars($selectedContextSchoolYear); ?>">
                 <input type="hidden" name="student" value="<?php echo htmlspecialchars($filter_student); ?>">
                 <input type="hidden" name="year" value="<?php echo htmlspecialchars($filter_year); ?>">
                 <input type="hidden" name="status" value="<?php echo htmlspecialchars($filter_status); ?>">
@@ -1288,7 +1305,7 @@ $export_query = http_build_query([
             </div>
 
             <button type="button" class="btn btn-export-csv btn-sm" data-bs-toggle="modal" data-bs-target="#smartExportModal">
-                <i class="bi bi-file-earmark-arrow-down"></i> Export CSV
+                <i class="bi bi-file-earmark-arrow-down"></i> Export
             </button>
         </div>
     </div>
@@ -1529,21 +1546,30 @@ document.addEventListener('DOMContentLoaded', function () {
     const sortBySelect = document.getElementById('sort_by');
     const sortDirSelect = document.getElementById('sort_dir');
     const exportScope = document.getElementById('export_scope');
+    const exportPeriod = document.getElementById('export_period');
+    const dailyMode = document.getElementById('daily_mode');
     const exportSchoolYear = document.getElementById('export_school_year');
     const exportYearLevel = document.getElementById('export_year_level');
     const exportSection = document.getElementById('export_section');
-    const exportSemesterInput = document.getElementById('semester');
-    const exportMonthInput = document.getElementById('month');
     const schoolYearGroup = document.getElementById('exportSchoolYearGroup');
     const yearGroup = document.getElementById('exportYearGroup');
     const sectionGroup = document.getElementById('exportSectionGroup');
+    const dailyModeGroup = document.getElementById('dailyModeGroup');
+    const dateGroup = document.getElementById('exportDateGroup');
+    const dateRangeGroup = document.getElementById('exportDateRangeGroup');
     const sortingColumn = document.getElementById('exportSortingColumn');
     const sortGroup = document.getElementById('exportSortGroup');
     const nameFormatGroup = document.getElementById('exportNameFormatGroup');
     const sortHint = document.getElementById('exportSortHint');
+    const exportValidationHint = document.getElementById('exportValidationHint');
     const sortByInput = document.getElementById('export_sort_by');
     const sortDirInput = document.getElementById('export_sort_dir');
     const nameFormatInput = document.getElementById('export_name_format');
+    const exportCsvBtn = document.getElementById('exportCsvBtn');
+    const exportDateInput = document.getElementById('export_date');
+    const exportStartDateInput = document.getElementById('export_start_date');
+    const exportEndDateInput = document.getElementById('export_end_date');
+    const smartExportModalForm = exportScope.closest('form');
 
     if (headerDatePicker) {
         headerDatePicker.addEventListener('change', function () {
@@ -1613,7 +1639,7 @@ document.addEventListener('DOMContentLoaded', function () {
 
     applyDateBounds(filterStartDateInput, filterEndDateInput, activeSchoolYearStart, activeSchoolYearEnd);
 
-    if (!exportScope || !exportSection || !exportYearLevel || !schoolYearGroup || !yearGroup || !sectionGroup || !sortingColumn || !sortGroup || !nameFormatGroup || !sortHint || !sortByInput || !sortDirInput || !nameFormatInput) {
+    if (!exportScope || !exportSection || !exportYearLevel || !schoolYearGroup || !yearGroup || !sectionGroup || !sortingColumn || !sortGroup || !nameFormatGroup || !sortHint || !sortByInput || !sortDirInput || !nameFormatInput || !exportCsvBtn || !exportValidationHint) {
         return;
     }
 
@@ -1645,34 +1671,51 @@ document.addEventListener('DOMContentLoaded', function () {
     };
 
     const getSectionsForYear = (schoolYearValue, yearValue) => {
-        if (!yearValue) {
-            return [];
-        }
-
-        if (schoolYearValue && teacherSectionMapBySchoolYear[schoolYearValue] && teacherSectionMapBySchoolYear[schoolYearValue][yearValue]) {
-            return teacherSectionMapBySchoolYear[schoolYearValue][yearValue];
-        }
-
         const merged = new Set();
+
+        if (yearValue) {
+            if (schoolYearValue && teacherSectionMapBySchoolYear[schoolYearValue] && teacherSectionMapBySchoolYear[schoolYearValue][yearValue]) {
+                return teacherSectionMapBySchoolYear[schoolYearValue][yearValue];
+            }
+
+            Object.keys(teacherSectionMapBySchoolYear).forEach((sy) => {
+                const yearMap = teacherSectionMapBySchoolYear[sy] || {};
+                (yearMap[yearValue] || []).forEach((section) => merged.add(section));
+            });
+
+            return Array.from(merged).sort((a, b) => String(a).localeCompare(String(b)));
+        }
+
+        if (schoolYearValue && teacherSectionMapBySchoolYear[schoolYearValue]) {
+            Object.keys(teacherSectionMapBySchoolYear[schoolYearValue]).forEach((year) => {
+                (teacherSectionMapBySchoolYear[schoolYearValue][year] || []).forEach((section) => merged.add(section));
+            });
+            return Array.from(merged).sort((a, b) => String(a).localeCompare(String(b)));
+        }
+
         Object.keys(teacherSectionMapBySchoolYear).forEach((sy) => {
-            const yearMap = teacherSectionMapBySchoolYear[sy] || {};
-            (yearMap[yearValue] || []).forEach((section) => merged.add(section));
+            Object.keys(teacherSectionMapBySchoolYear[sy] || {}).forEach((year) => {
+                (teacherSectionMapBySchoolYear[sy][year] || []).forEach((section) => merged.add(section));
+            });
         });
 
         return Array.from(merged).sort((a, b) => String(a).localeCompare(String(b)));
     };
 
     const populateExportSections = (selectedSectionValue = '') => {
-        const sections = getSectionsForYear(exportSchoolYear ? exportSchoolYear.value : '', exportYearLevel.value);
+        const mode = exportScope ? exportScope.value : 'filters';
+        const needsYearLevel = mode === 'section';
+        const selectedYearValue = needsYearLevel ? exportYearLevel.value : '';
+        const sections = getSectionsForYear(exportSchoolYear ? exportSchoolYear.value : '', selectedYearValue);
         exportSection.innerHTML = '';
 
-        if (!exportYearLevel.value) {
+        if (needsYearLevel && !exportYearLevel.value) {
             exportSection.add(new Option('Select year first', ''));
             exportSection.value = '';
             return;
         }
 
-        exportSection.add(new Option('Select section', ''));
+        exportSection.add(new Option('All sections', ''));
         sections.forEach((section) => {
             exportSection.add(new Option(section, section));
         });
@@ -1684,51 +1727,31 @@ document.addEventListener('DOMContentLoaded', function () {
         }
     };
 
-    const populateSemesterMonths = () => {
-        if (!exportSemesterInput || !exportMonthInput) {
-            return;
-        }
-
-        const monthNames = {
-            1: 'January',
-            2: 'February',
-            3: 'March',
-            4: 'April',
-            5: 'May',
-            6: 'June',
-            7: 'July',
-            8: 'August',
-            9: 'September',
-            10: 'October',
-            11: 'November',
-            12: 'December'
-        };
-
-        const previousMonth = Number(exportMonthInput.value || 0);
-        const isSemOne = exportSemesterInput.value === '1';
-        const start = isSemOne ? 1 : 7;
-        const end = isSemOne ? 6 : 12;
-
-        exportMonthInput.innerHTML = '';
-        for (let m = start; m <= end; m++) {
-            exportMonthInput.add(new Option(monthNames[m], String(m)));
-        }
-
-        if (previousMonth >= start && previousMonth <= end) {
-            exportMonthInput.value = String(previousMonth);
-        } else {
-            exportMonthInput.value = String(start);
-        }
-    };
-
     const syncExportScope = () => {
         const mode = exportScope.value;
-        schoolYearGroup.style.display = (mode === 'school_year' || mode === 'section') ? '' : 'none';
-        yearGroup.style.display = mode === 'section' ? '' : 'none';
-        sectionGroup.style.display = mode === 'section' ? '' : 'none';
+        const period = exportPeriod ? exportPeriod.value : 'daily';
+        const dayMode = dailyMode ? dailyMode.value : 'exact';
 
-        const requireSectionFirst = (mode === 'section');
-        const canShowTailOptions = !requireSectionFirst || (exportSection.value.trim() !== '');
+        const showSchoolYear = period === 'school_year' || mode === 'school_year' || mode === 'section';
+        const showYearLevel = mode === 'section';
+        const showSection = mode === 'school_year' || mode === 'section';
+
+        schoolYearGroup.style.display = showSchoolYear ? '' : 'none';
+        yearGroup.style.display = showYearLevel ? '' : 'none';
+        sectionGroup.style.display = showSection ? '' : 'none';
+
+        if (dailyModeGroup) {
+            dailyModeGroup.style.display = period === 'daily' ? '' : 'none';
+        }
+        if (dateGroup) {
+            dateGroup.style.display = period === 'daily' && dayMode === 'exact' ? '' : 'none';
+        }
+        if (dateRangeGroup) {
+            dateRangeGroup.style.display = period === 'daily' && dayMode === 'range' ? '' : 'none';
+        }
+
+        const sectionRequired = mode === 'section';
+        const canShowTailOptions = !sectionRequired || exportSection.value.trim() !== '';
 
         sortingColumn.style.display = '';
         sortGroup.style.display = canShowTailOptions ? '' : 'none';
@@ -1739,10 +1762,72 @@ document.addEventListener('DOMContentLoaded', function () {
         sortDirInput.disabled = !canShowTailOptions;
         nameFormatInput.disabled = !canShowTailOptions;
 
-        populateSemesterMonths();
+        applyExportButtonState();
     };
 
-    exportScope.addEventListener('change', syncExportScope);
+    const getExportValidationError = () => {
+        const mode = exportScope.value;
+        const period = exportPeriod ? exportPeriod.value : 'daily';
+        const dayMode = dailyMode ? dailyMode.value : 'exact';
+
+        if (period === 'daily') {
+            if (dayMode === 'exact') {
+                if (!exportDateInput || exportDateInput.value.trim() === '') {
+                    return 'Select an exact date before exporting.';
+                }
+            } else if (dayMode === 'range') {
+                const start = exportStartDateInput ? exportStartDateInput.value.trim() : '';
+                const end = exportEndDateInput ? exportEndDateInput.value.trim() : '';
+                if (start === '' || end === '') {
+                    return 'Select both start and end dates before exporting.';
+                }
+                if (start > end) {
+                    return 'Date range is invalid: start date must be earlier than end date.';
+                }
+            }
+        } else if (period === 'school_year') {
+            if (!exportSchoolYear || exportSchoolYear.value.trim() === '') {
+                return 'Select a school year for School Year period.';
+            }
+        }
+
+        if (mode === 'school_year') {
+            if (!exportSchoolYear || exportSchoolYear.value.trim() === '') {
+                return 'Select a school year for School Year scope.';
+            }
+        }
+
+        if (mode === 'section') {
+            if (exportYearLevel.value.trim() === '') {
+                return 'Select a year level for Section scope.';
+            }
+            if (exportSection.value.trim() === '') {
+                return 'Select a section for Section scope.';
+            }
+        }
+
+        return '';
+    };
+
+    const applyExportButtonState = () => {
+        const errorMessage = getExportValidationError();
+        const isValid = errorMessage === '';
+
+        exportCsvBtn.disabled = !isValid;
+        exportValidationHint.textContent = errorMessage;
+        exportValidationHint.style.display = isValid ? 'none' : '';
+    };
+
+    exportScope.addEventListener('change', function () {
+        populateExportSections(exportSection.value);
+        syncExportScope();
+    });
+    if (exportPeriod) {
+        exportPeriod.addEventListener('change', syncExportScope);
+    }
+    if (dailyMode) {
+        dailyMode.addEventListener('change', syncExportScope);
+    }
     if (exportSchoolYear) {
         exportSchoolYear.addEventListener('change', function () {
             populateExportYears(exportYearLevel.value);
@@ -1755,19 +1840,33 @@ document.addEventListener('DOMContentLoaded', function () {
         syncExportScope();
     });
     exportSection.addEventListener('change', syncExportScope);
-    if (exportSemesterInput) {
-        exportSemesterInput.addEventListener('change', syncExportScope);
+    if (exportDateInput) {
+        exportDateInput.addEventListener('change', syncExportScope);
+    }
+    if (exportStartDateInput) {
+        exportStartDateInput.addEventListener('change', syncExportScope);
+    }
+    if (exportEndDateInput) {
+        exportEndDateInput.addEventListener('change', syncExportScope);
+    }
+    if (smartExportModalForm) {
+        smartExportModalForm.addEventListener('submit', function (event) {
+            const errorMessage = getExportValidationError();
+            if (errorMessage !== '') {
+                event.preventDefault();
+                applyExportButtonState();
+            }
+        });
     }
 
     populateExportYears(selectedExportYearLevel);
     populateExportSections(selectedExportSection);
-    populateSemesterMonths();
     syncExportScope();
 });
 </script>
 
 <?php require '../includes/footer.php'; /*
- * © 2026 TambyTech.
+ * ï¿½ 2026 TambyTech.
  * This source code is proprietary and confidential.
  * Any unauthorized use, copying, modification, distribution, or disclosure is strictly prohibited.
  * All rights reserved.

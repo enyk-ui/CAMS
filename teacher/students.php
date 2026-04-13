@@ -202,6 +202,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
             $message = 'Please fill in all required fields.';
             $message_type = 'danger';
         } else {
+            $duplicateSql = 'SELECT id FROM students WHERE first_name = ? AND last_name = ? AND section = ? AND id <> ? LIMIT 1';
+            $duplicateStmt = $mysqli->prepare($duplicateSql);
+            $duplicateStmt->bind_param('sssi', $first_name, $last_name, $section, $student_id_db);
+            $duplicateStmt->execute();
+            $duplicateRow = $duplicateStmt->get_result()->fetch_assoc();
+            $duplicateStmt->close();
+
+            if ($duplicateRow) {
+                $message = 'Duplicate student detected in this section.';
+                $message_type = 'danger';
+            } else {
             // Build update query based on available columns
             $setClauses = [
                 'first_name = ?',
@@ -249,6 +260,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
             } else {
                 $message = 'Error updating student: ' . $mysqli->error;
                 $message_type = 'danger';
+            }
             }
         }
     }
@@ -564,7 +576,7 @@ function openEditModal(student) {
 </script>
 
 <?php require '../includes/footer.php'; /*
- * © 2026 TambyTech.
+ * ï¿½ 2026 TambyTech.
  * This source code is proprietary and confidential.
  * Any unauthorized use, copying, modification, distribution, or disclosure is strictly prohibited.
  * All rights reserved.

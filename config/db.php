@@ -33,7 +33,7 @@ $mysqli->query("SET time_zone = '+08:00'");
 mysqli_report(MYSQLI_REPORT_ERROR | MYSQLI_REPORT_STRICT);
 
 /*
- * © 2026 TambyTech.
+ * ï¿½ 2026 TambyTech.
  * This source code is proprietary and confidential.
  * Any unauthorized use, copying, modification, distribution, or disclosure is strictly prohibited.
  * All rights reserved.

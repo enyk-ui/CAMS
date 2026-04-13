@@ -364,7 +364,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $setupError === '') {
         $schoolYearLabel = trim($_POST['school_year_label'] ?? $activeSchoolYearLabel);
         $yearLevel = (int)($_POST['year_level'] ?? 0);
         $section = trim($_POST['section'] ?? '');
-        $sectionIds = array_values(array_unique(array_filter(array_map('intval', (array)($_POST['section_ids'] ?? [])), static fn($id) => $id > 0)));
+        $sectionId = (int)($_POST['section_id'] ?? 0);
+        if ($sectionId <= 0) {
+            $fallbackSectionIds = array_values(array_unique(array_filter(array_map('intval', (array)($_POST['section_ids'] ?? [])), static fn($id) => $id > 0)));
+            if (!empty($fallbackSectionIds)) {
+                $sectionId = (int)$fallbackSectionIds[0];
+            }
+        }
+        $sectionIds = $sectionId > 0 ? [$sectionId] : [];
         $status = ($_POST['status'] ?? 'active') === 'inactive' ? 'inactive' : 'active';
 
         if (empty($sectionIds) && $section !== '' && $yearLevel > 0) {
@@ -434,7 +441,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $setupError === '') {
         $schoolYearLabel = trim($_POST['school_year_label'] ?? $activeSchoolYearLabel);
         $yearLevel = (int)($_POST['year_level'] ?? 0);
         $section = trim($_POST['section'] ?? '');
-        $sectionIds = array_values(array_unique(array_filter(array_map('intval', (array)($_POST['section_ids'] ?? [])), static fn($id) => $id > 0)));
+        $sectionId = (int)($_POST['section_id'] ?? 0);
+        if ($sectionId <= 0) {
+            $fallbackSectionIds = array_values(array_unique(array_filter(array_map('intval', (array)($_POST['section_ids'] ?? [])), static fn($id) => $id > 0)));
+            if (!empty($fallbackSectionIds)) {
+                $sectionId = (int)$fallbackSectionIds[0];
+            }
+        }
+        $sectionIds = $sectionId > 0 ? [$sectionId] : [];
         $status = ($_POST['status'] ?? 'active') === 'inactive' ? 'inactive' : 'active';
         $newPassword = $_POST['new_password'] ?? '';
 
@@ -515,6 +529,65 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $setupError === '') {
             }
         }
     }
+
+    if ($action === 'delete_teacher') {
+        $teacherId = (int)($_POST['teacher_id'] ?? 0);
+
+        if ($teacherId <= 0) {
+            $error = 'Invalid teacher account.';
+        } else {
+            $checkStmt = $mysqli->prepare('SELECT id FROM users WHERE id = ? AND role = "teacher" LIMIT 1');
+            if (!$checkStmt) {
+                $error = 'Unable to verify teacher account.';
+            } else {
+                $checkStmt->bind_param('i', $teacherId);
+                $checkStmt->execute();
+                $teacherRow = $checkStmt->get_result()->fetch_assoc();
+                $checkStmt->close();
+
+                if (!$teacherRow) {
+                    $error = 'Teacher account not found.';
+                } else {
+                    $mysqli->begin_transaction();
+                    try {
+                        $deleteScheduleStmt = $mysqli->prepare('DELETE FROM teacher_daily_schedules WHERE teacher_id = ?');
+                        if ($deleteScheduleStmt) {
+                            $deleteScheduleStmt->bind_param('i', $teacherId);
+                            $deleteScheduleStmt->execute();
+                            $deleteScheduleStmt->close();
+                        }
+
+                        $deleteMapStmt = $mysqli->prepare('DELETE FROM teacher_sections WHERE teacher_id = ?');
+                        if ($deleteMapStmt) {
+                            $deleteMapStmt->bind_param('i', $teacherId);
+                            $deleteMapStmt->execute();
+                            $deleteMapStmt->close();
+                        }
+
+                        $deleteUserStmt = $mysqli->prepare('DELETE FROM users WHERE id = ? AND role = "teacher" LIMIT 1');
+                        if (!$deleteUserStmt) {
+                            throw new RuntimeException('Unable to prepare teacher delete statement.');
+                        }
+
+                        $deleteUserStmt->bind_param('i', $teacherId);
+                        $deleteUserStmt->execute();
+                        $deletedRows = $deleteUserStmt->affected_rows;
+                        $deleteUserStmt->close();
+
+                        if ($deletedRows <= 0) {
+                            throw new RuntimeException('Teacher account was not deleted.');
+                        }
+
+                        $mysqli->commit();
+                        $message = 'Teacher account deleted successfully.';
+                    } catch (Throwable $e) {
+                        $mysqli->rollback();
+                        $error = 'Unable to delete teacher account. Please try again.';
+                    }
+                }
+            }
+        }
+    }
 }
 
 $teachers = [];
@@ -527,25 +600,18 @@ if ($setupError === '') {
     }
 }
 
+$defaultSectionNames = ['Alpha', 'Beta', 'Charlie', 'Delta'];
+for ($grade = 1; $grade <= 4; $grade++) {
+    foreach ($defaultSectionNames as $defaultSectionName) {
+        resolveOrCreateSectionId($mysqli, $grade, $defaultSectionName);
+    }
+}
+
 $sectionsCatalog = [];
 $sectionResult = $mysqli->query('SELECT id, name, year_grade FROM sections ORDER BY CAST(year_grade AS UNSIGNED) ASC, name ASC');
 if ($sectionResult) {
     while ($row = $sectionResult->fetch_assoc()) {
         $sectionsCatalog[] = $row;
-    }
-}
-
-if (empty($sectionsCatalog)) {
-    $fallbackSections = ['Alpha', 'Beta', 'Charlie', 'Delta'];
-    foreach ($fallbackSections as $fallbackSection) {
-        $newSectionId = resolveOrCreateSectionId($mysqli, 1, $fallbackSection);
-        if ($newSectionId > 0) {
-            $sectionsCatalog[] = [
-                'id' => $newSectionId,
-                'name' => $fallbackSection,
-                'year_grade' => '1',
-            ];
-        }
     }
 }
 ?>
@@ -616,12 +682,17 @@ if (empty($sectionsCatalog)) {
                                     <td>
                                         <button
                                             type="button"
-                                            class="btn btn-sm btn-outline-primary"
+                                            class="btn btn-sm btn-outline-primary me-1"
                                             data-bs-toggle="modal"
                                             data-bs-target="#editTeacherModal<?php echo (int) $teacher['id']; ?>"
                                         >
                                             Edit
                                         </button>
+                                        <form method="POST" class="d-inline" onsubmit="return confirm('Delete this teacher account? This also removes section and schedule mappings.');">
+                                            <input type="hidden" name="action" value="delete_teacher">
+                                            <input type="hidden" name="teacher_id" value="<?php echo (int)$teacher['id']; ?>">
+                                            <button type="submit" class="btn btn-sm btn-outline-danger">Delete</button>
+                                        </form>
                                     </td>
                                 </tr>
                             <?php endforeach; ?>
@@ -680,15 +751,15 @@ if (empty($sectionsCatalog)) {
                         </select>
                     </div>
                     <div class="col-md-6">
-                        <label class="form-label">Sections</label>
-                        <select name="section_ids[]" class="form-select" multiple size="6" required>
+                        <label class="form-label">Section</label>
+                        <select name="section_id" class="form-select" required>
+                            <option value="">Select section...</option>
                             <?php foreach ($sectionsCatalog as $sectionRow): ?>
                                 <option value="<?php echo (int)$sectionRow['id']; ?>" data-year="<?php echo htmlspecialchars((string)$sectionRow['year_grade']); ?>">
                                     <?php echo htmlspecialchars((string)$sectionRow['year_grade'] . ' - ' . (string)$sectionRow['name']); ?>
                                 </option>
                             <?php endforeach; ?>
                         </select>
-                        <small class="text-muted">Use Ctrl/Cmd + click to select multiple sections.</small>
                     </div>
                     <div class="col-md-6">
                         <label class="form-label">Password</label>
@@ -713,6 +784,7 @@ if (empty($sectionsCatalog)) {
 
 <?php foreach ($teachers as $teacher): ?>
     <?php $teacherSectionIds = array_values(array_filter(array_map('intval', explode(',', (string)($teacher['section_ids_csv'] ?? ''))))); ?>
+    <?php $teacherPrimarySectionId = !empty($teacherSectionIds) ? (int)$teacherSectionIds[0] : 0; ?>
     <div class="modal fade" id="editTeacherModal<?php echo (int) $teacher['id']; ?>" tabindex="-1" aria-hidden="true">
         <div class="modal-dialog modal-lg modal-dialog-centered">
             <div class="modal-content">
@@ -766,16 +838,16 @@ if (empty($sectionsCatalog)) {
                             </select>
                         </div>
                         <div class="col-md-6">
-                            <label class="form-label">Sections</label>
-                            <select name="section_ids[]" class="form-select" multiple size="6" required>
+                            <label class="form-label">Section</label>
+                            <select name="section_id" class="form-select" required>
+                                <option value="">Select section...</option>
                                 <?php foreach ($sectionsCatalog as $sectionRow): ?>
                                     <?php $sid = (int)$sectionRow['id']; ?>
-                                    <option value="<?php echo $sid; ?>" data-year="<?php echo htmlspecialchars((string)$sectionRow['year_grade']); ?>" <?php echo in_array($sid, $teacherSectionIds, true) ? 'selected' : ''; ?>>
+                                    <option value="<?php echo $sid; ?>" data-year="<?php echo htmlspecialchars((string)$sectionRow['year_grade']); ?>" <?php echo $sid === $teacherPrimarySectionId ? 'selected' : ''; ?>>
                                         <?php echo htmlspecialchars((string)$sectionRow['year_grade'] . ' - ' . (string)$sectionRow['name']); ?>
                                     </option>
                                 <?php endforeach; ?>
                             </select>
-                            <small class="text-muted">Use Ctrl/Cmd + click to select multiple sections.</small>
                         </div>
                         <div class="col-md-6">
                             <label class="form-label">Status</label>
@@ -815,7 +887,7 @@ document.addEventListener('DOMContentLoaded', function () {
         }
 
         const yearSelect = form.querySelector('select[name="year_level"]');
-        const sectionSelect = form.querySelector('select[name="section_ids[]"]');
+        const sectionSelect = form.querySelector('select[name="section_id"]');
         if (!yearSelect || !sectionSelect) {
             return;
         }
@@ -823,6 +895,9 @@ document.addEventListener('DOMContentLoaded', function () {
         const selectedYear = String(yearSelect.value || '').trim();
         const hasYear = selectedYear !== '';
         sectionSelect.disabled = !hasYear;
+        if (!hasYear) {
+            sectionSelect.value = '';
+        }
 
         Array.from(sectionSelect.options).forEach(function (option) {
             const optionYear = String(option.getAttribute('data-year') || '').trim();
@@ -830,7 +905,7 @@ document.addEventListener('DOMContentLoaded', function () {
 
             option.hidden = !visible;
             option.disabled = !visible;
-            if (!visible) {
+            if (!visible && option.selected) {
                 option.selected = false;
             }
         });
@@ -862,7 +937,7 @@ document.addEventListener('DOMContentLoaded', function () {
 </script>
 
 <?php require '../includes/footer.php'; /*
- * © 2026 TambyTech.
+ * ï¿½ 2026 TambyTech.
  * This source code is proprietary and confidential.
  * Any unauthorized use, copying, modification, distribution, or disclosure is strictly prohibited.
  * All rights reserved.

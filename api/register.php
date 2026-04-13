@@ -279,6 +279,20 @@ try {
     if ($action === 'rollback') {
         $studentId = require_positive_int($input, 'student_id');
 
+        $attendanceRefStmt = $mysqli->prepare('SELECT id FROM attendance WHERE student_id = ? LIMIT 1');
+        if ($attendanceRefStmt) {
+            $attendanceRefStmt->bind_param('i', $studentId);
+            $attendanceRefStmt->execute();
+            $hasAttendanceRef = $attendanceRefStmt->get_result()->fetch_assoc();
+            $attendanceRefStmt->close();
+            if ($hasAttendanceRef) {
+                api_response(409, [
+                    'success' => false,
+                    'message' => 'Rollback blocked: student already has attendance records.'
+                ]);
+            }
+        }
+
         if ($deviceCommandLinkColumn === null) {
             api_response(500, [
                 'success' => false,
@@ -419,6 +433,20 @@ try {
             ]);
         }
 
+        $duplicateStmt = $mysqli->prepare('SELECT id FROM students WHERE first_name = ? AND last_name = ? AND section_id = ? AND id <> ? LIMIT 1');
+        if ($duplicateStmt) {
+            $duplicateStmt->bind_param('ssii', $firstName, $lastName, $sectionId, $studentId);
+            $duplicateStmt->execute();
+            $dupRow = $duplicateStmt->get_result()->fetch_assoc();
+            $duplicateStmt->close();
+            if ($dupRow) {
+                api_response(409, [
+                    'success' => false,
+                    'message' => 'Duplicate student detected for the selected section.'
+                ]);
+            }
+        }
+
         $writeMap['status'] = 'active';
         $setParts = [];
         $values = [];
@@ -450,6 +478,20 @@ try {
     }
 
     $writeMap['status'] = 'active';
+
+    $duplicateStmt = $mysqli->prepare('SELECT id FROM students WHERE first_name = ? AND last_name = ? AND section_id = ? LIMIT 1');
+    if ($duplicateStmt) {
+        $duplicateStmt->bind_param('ssi', $firstName, $lastName, $sectionId);
+        $duplicateStmt->execute();
+        $dupRow = $duplicateStmt->get_result()->fetch_assoc();
+        $duplicateStmt->close();
+        if ($dupRow) {
+            api_response(409, [
+                'success' => false,
+                'message' => 'Duplicate student detected for the selected section.'
+            ]);
+        }
+    }
 
     $columns = array_keys($writeMap);
     $values = array_values($writeMap);
@@ -491,7 +533,7 @@ try {
 }
 
 /*
- * © 2026 TambyTech.
+ * ï¿½ 2026 TambyTech.
  * This source code is proprietary and confidential.
  * Any unauthorized use, copying, modification, distribution, or disclosure is strictly prohibited.
  * All rights reserved.

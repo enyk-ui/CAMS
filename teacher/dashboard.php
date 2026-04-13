@@ -91,7 +91,15 @@ $sectionScopeLabel = ($hasSectionIdColumn && !empty($teacherSectionIds))
 $today = date('Y-m-d');
 
 SchoolYearHelper::ensureSchoolYearSupport($mysqli);
+$selectedSchoolYearLabel = SchoolYearHelper::resolveSelectedSchoolYearLabel($mysqli);
 $activeSchoolYear = SchoolYearHelper::getEffectiveSchoolYearRange($mysqli);
+$schoolYears = SchoolYearHelper::getAllSchoolYears($mysqli);
+foreach ($schoolYears as $sy) {
+    if ((string)($sy['label'] ?? '') === $selectedSchoolYearLabel) {
+        $activeSchoolYear = $sy;
+        break;
+    }
+}
 $schoolYearStart = $activeSchoolYear['start_date'] ?? date('Y-01-01');
 $schoolYearEnd = $activeSchoolYear['end_date'] ?? date('Y-12-31');
 
@@ -542,7 +550,7 @@ refreshTeacherAttendanceAnalytics();
 </script>
 
 <?php require '../includes/footer.php'; /*
- * © 2026 TambyTech.
+ * ï¿½ 2026 TambyTech.
  * This source code is proprietary and confidential.
  * Any unauthorized use, copying, modification, distribution, or disclosure is strictly prohibited.
  * All rights reserved.

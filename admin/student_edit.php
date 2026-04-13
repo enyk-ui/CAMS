@@ -176,6 +176,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $message = 'Please fill in all required fields.';
         $message_type = 'danger';
     } else {
+        $duplicateStmt = $mysqli->prepare('SELECT id FROM students WHERE first_name = ? AND last_name = ? AND section = ? AND id <> ? LIMIT 1');
+        $duplicateStmt->bind_param('sssi', $first_name, $last_name, $section, $student_id);
+        $duplicateStmt->execute();
+        $duplicateRow = $duplicateStmt->get_result()->fetch_assoc();
+        $duplicateStmt->close();
+
+        if ($duplicateRow) {
+            $message = 'Duplicate student detected in the selected section.';
+            $message_type = 'danger';
+        } else {
         // Build update query based on available columns in current schema.
         $setClauses = [
             'first_name = ?',
@@ -232,6 +242,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         } else {
             $message = 'Error updating student: ' . $mysqli->error;
             $message_type = 'danger';
+        }
         }
     }
 }
@@ -1425,7 +1436,7 @@ function showCompletion() {
 </script>
 
 <?php require '../includes/footer.php'; /*
- * © 2026 TambyTech.
+ * ï¿½ 2026 TambyTech.
  * This source code is proprietary and confidential.
  * Any unauthorized use, copying, modification, distribution, or disclosure is strictly prohibited.
  * All rights reserved.

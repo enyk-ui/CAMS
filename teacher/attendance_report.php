@@ -225,6 +225,16 @@ function buildSchoolYearMonthOptions(array $schoolYear): array
     }
 }
 
+function normalizeDateValue($value, string $fallback): string
+{
+    $value = trim((string)$value);
+    if ($value === '' || !preg_match('/^\d{4}-\d{2}-\d{2}$/', $value)) {
+        return $fallback;
+    }
+
+    return $value;
+}
+
 if (($_SESSION['role'] ?? '') !== 'teacher') {
     header('Location: ../index.php?error=Unauthorized');
     exit;
@@ -271,8 +281,15 @@ if ($hasSectionIdColumn && !empty($teacherSectionIds)) {
 SchoolYearHelper::ensureSchoolYearSupport($mysqli);
 $hasMiddleInitial = studentColumnExists($mysqli, 'middle_initial');
 $hasExtension = studentColumnExists($mysqli, 'extension');
-$activeSchoolYear = SchoolYearHelper::getEffectiveSchoolYearRange($mysqli);
 $schoolYears = SchoolYearHelper::getAllSchoolYears($mysqli);
+$selectedContextSchoolYearLabel = trim((string)($_GET['school_year'] ?? SchoolYearHelper::resolveSelectedSchoolYearLabel($mysqli)));
+if ($selectedContextSchoolYearLabel !== '') {
+    SchoolYearHelper::setSelectedSchoolYearLabel($selectedContextSchoolYearLabel);
+}
+$activeSchoolYear = findSchoolYearByLabel($schoolYears, $selectedContextSchoolYearLabel);
+if (!$activeSchoolYear) {
+    $activeSchoolYear = SchoolYearHelper::getEffectiveSchoolYearRange($mysqli);
+}
 $syStartDate = $activeSchoolYear['start_date'] ?? date('Y-01-01');
 $syEndDate = $activeSchoolYear['end_date'] ?? date('Y-12-31');
 
@@ -301,26 +318,84 @@ if ($filter_end_date > $syEndDate) {
 }
 
 $filter_status = trim((string)($_GET['status'] ?? ''));
-$selectedExportPeriod = trim((string)($_GET['export_period'] ?? 'semester'));
-if (!in_array($selectedExportPeriod, ['daily', 'weekly', 'monthly', 'semester'], true)) {
-    $selectedExportPeriod = 'semester';
+$selectedExportPeriod = trim((string)($_GET['export_period'] ?? 'school_year'));
+if (!in_array($selectedExportPeriod, ['daily', 'school_year'], true)) {
+    $selectedExportPeriod = 'school_year';
+}
+$selectedExportFormat = trim((string)($_GET['export'] ?? 'csv'));
+if (!in_array($selectedExportFormat, ['csv'], true)) {
+    $selectedExportFormat = 'csv';
+}
+
+$yearLevelOptions = [];
+if (!empty($sectionCatalog)) {
+    foreach ($sectionCatalog as $catalogRow) {
+        $yearLabel = trim((string)($catalogRow['year_grade'] ?? ''));
+        if ($yearLabel !== '') {
+            $yearLevelOptions[$yearLabel] = true;
+        }
+    }
+} elseif ($teacherYear > 0) {
+    $yearLevelOptions[(string)$teacherYear] = true;
+}
+$yearLevelOptions = array_keys($yearLevelOptions);
+sort($yearLevelOptions, SORT_NATURAL | SORT_FLAG_CASE);
+$selectedYearLevel = trim((string)($_GET['year_level'] ?? ''));
+if ($selectedYearLevel !== '' && !in_array($selectedYearLevel, $yearLevelOptions, true)) {
+    $selectedYearLevel = '';
 }
 
 $selectedExportSchoolYearLabel = trim((string)($_GET['export_school_year'] ?? ($activeSchoolYear['label'] ?? '')));
+$selectedDailyMode = trim((string)($_GET['daily_mode'] ?? 'exact'));
+if (!in_array($selectedDailyMode, ['exact', 'range'], true)) {
+    $selectedDailyMode = 'exact';
+}
 $selectedExportDate = normalizeDateValue($_GET['export_date'] ?? $defaultDate, $defaultDate);
-$selectedExportWeekStart = normalizeDateValue($_GET['export_week_start'] ?? $defaultDate, $defaultDate);
-$selectedExportMonthStart = normalizeDateValue($_GET['export_month_start'] ?? $defaultDate, $defaultDate);
-$selectedExportSemester = isset($_GET['semester']) ? (int)$_GET['semester'] : 1;
-if (!in_array($selectedExportSemester, [1, 2], true)) {
-    $selectedExportSemester = 1;
+$selectedExportStartDate = normalizeDateValue($_GET['export_start_date'] ?? $filter_start_date, $filter_start_date);
+$selectedExportEndDate = normalizeDateValue($_GET['export_end_date'] ?? $filter_end_date, $filter_end_date);
+$defaultTeacherSectionId = 0;
+if (!empty($sectionCatalog)) {
+    if ($filterSectionId > 0) {
+        $defaultTeacherSectionId = $filterSectionId;
+    } else {
+        $defaultTeacherSectionId = (int)($sectionCatalog[0]['id'] ?? 0);
+    }
+}
+$selectedExportYearLevel = trim((string)($_GET['export_year_level'] ?? $selectedYearLevel));
+if ($selectedExportYearLevel !== '' && !in_array($selectedExportYearLevel, $yearLevelOptions, true)) {
+    $selectedExportYearLevel = '';
+}
+$selectedExportSectionId = isset($_GET['export_section_id']) ? (int)$_GET['export_section_id'] : $defaultTeacherSectionId;
+if ($selectedExportSectionId > 0 && !in_array($selectedExportSectionId, $teacherSectionIds, true)) {
+    $selectedExportSectionId = 0;
+}
+if ($selectedExportSectionId === 0 && $defaultTeacherSectionId > 0) {
+    $selectedExportSectionId = $defaultTeacherSectionId;
+}
+if ($selectedExportYearLevel === '' && $selectedExportSectionId > 0) {
+    foreach ($sectionCatalog as $catalogRow) {
+        if ((int)$catalogRow['id'] === $selectedExportSectionId) {
+            $selectedExportYearLevel = trim((string)($catalogRow['year_grade'] ?? ''));
+            break;
+        }
+    }
+}
+$selectedExportSortBy = trim((string)($_GET['export_sort_by'] ?? 'date'));
+if (!in_array($selectedExportSortBy, ['date', 'name'], true)) {
+    $selectedExportSortBy = 'date';
+}
+$selectedExportNameFormat = trim((string)($_GET['export_name_format'] ?? 'last_name_first'));
+if (!in_array($selectedExportNameFormat, ['last_name_first', 'full_name'], true)) {
+    $selectedExportNameFormat = 'last_name_first';
 }
 
 // Handle export
-if (isset($_GET['export']) && $_GET['export'] === 'csv') {
-    $exportPeriod = trim((string)($_GET['export_period'] ?? 'semester'));
-    $allowedExportPeriods = ['daily', 'weekly', 'monthly', 'semester'];
+if (isset($_GET['export']) && (string)$_GET['export'] === 'csv') {
+    $exportFormat = trim((string)($_GET['export'] ?? 'csv'));
+    $exportPeriod = trim((string)($_GET['export_period'] ?? 'school_year'));
+    $allowedExportPeriods = ['daily', 'school_year'];
     if (!in_array($exportPeriod, $allowedExportPeriods, true)) {
-        $exportPeriod = 'semester';
+        $exportPeriod = 'school_year';
     }
 
     $exportSchoolYearLabel = trim((string)($_GET['export_school_year'] ?? ($activeSchoolYear['label'] ?? '')));
@@ -330,10 +405,21 @@ if (isset($_GET['export']) && $_GET['export'] === 'csv') {
         $exportSchoolYearLabel = (string)($activeSchoolYear['label'] ?? '');
     }
 
+    $exportDailyMode = trim((string)($_GET['daily_mode'] ?? 'exact'));
+    if (!in_array($exportDailyMode, ['exact', 'range'], true)) {
+        $exportDailyMode = 'exact';
+    }
     $exportDate = normalizeDateValue($_GET['export_date'] ?? $defaultDate, $defaultDate);
-    $exportWeekStart = normalizeDateValue($_GET['export_week_start'] ?? $defaultDate, $defaultDate);
-    $exportMonthStart = normalizeDateValue($_GET['export_month_start'] ?? $defaultDate, $defaultDate);
-    $exportSemester = isset($_GET['semester']) ? (int)$_GET['semester'] : 1;
+    $exportStartInput = normalizeDateValue($_GET['export_start_date'] ?? $filter_start_date, $filter_start_date);
+    $exportEndInput = normalizeDateValue($_GET['export_end_date'] ?? $filter_end_date, $filter_end_date);
+    $exportYearLevel = trim((string)($_GET['export_year_level'] ?? $selectedYearLevel));
+    $exportSectionId = isset($_GET['export_section_id']) ? (int)($_GET['export_section_id']) : $selectedExportSectionId;
+    if ($exportSectionId > 0 && !in_array($exportSectionId, $teacherSectionIds, true)) {
+        $exportSectionId = 0;
+    }
+    if ($exportSectionId === 0 && $defaultTeacherSectionId > 0) {
+        $exportSectionId = $defaultTeacherSectionId;
+    }
     $exportSortBy = trim((string)($_GET['export_sort_by'] ?? 'date'));
     $exportNameFormat = trim((string)($_GET['export_name_format'] ?? 'last_name_first'));
 
@@ -349,39 +435,27 @@ if (isset($_GET['export']) && $_GET['export'] === 'csv') {
         $exportNameFormat = 'last_name_first';
     }
 
-    $exportStartDate = $defaultDate;
-    $exportEndDate = $defaultDate;
-    $exportLabel = 'Semester';
-
-    $semesterRanges = buildSchoolYearSemesterRanges($exportSchoolYear);
-    $monthOptions = buildSchoolYearMonthOptions($exportSchoolYear);
+    $exportStartDate = (string)($exportSchoolYear['start_date'] ?? $syStartDate);
+    $exportEndDate = (string)($exportSchoolYear['end_date'] ?? $syEndDate);
+    $exportLabel = 'School Year';
 
     if ($exportPeriod === 'daily') {
-        $exportStartDate = $exportDate;
-        $exportEndDate = $exportDate;
-        $exportLabel = 'Daily';
-    } elseif ($exportPeriod === 'weekly') {
-        $weekStartTs = strtotime($exportWeekStart . ' monday this week');
-        if ($weekStartTs === false) {
-            $weekStartTs = strtotime($exportWeekStart);
+        if ($exportDailyMode === 'range') {
+            $exportStartDate = $exportStartInput;
+            $exportEndDate = $exportEndInput;
+            if ($exportStartDate > $exportEndDate) {
+                [$exportStartDate, $exportEndDate] = [$exportEndDate, $exportStartDate];
+            }
+            $exportLabel = 'Daily (Date Range)';
+        } else {
+            $exportStartDate = $exportDate;
+            $exportEndDate = $exportDate;
+            $exportLabel = 'Daily (Exact Date)';
         }
-        $exportStartDate = date('Y-m-d', $weekStartTs ?: strtotime($exportWeekStart));
-        $exportEndDate = date('Y-m-d', strtotime($exportStartDate . ' +6 days'));
-        $exportLabel = 'Weekly';
-    } elseif ($exportPeriod === 'monthly') {
-        $exportStartDate = date('Y-m-01', strtotime($exportMonthStart));
-        $exportEndDate = date('Y-m-t', strtotime($exportStartDate));
-        $exportLabel = 'Monthly';
-    } elseif ($exportPeriod === 'semester') {
-        if (!in_array($exportSemester, [1, 2], true)) {
-            $exportSemester = 1;
-        }
-
-        if (!empty($semesterRanges[$exportSemester])) {
-            $exportStartDate = (string)$semesterRanges[$exportSemester]['start'];
-            $exportEndDate = (string)$semesterRanges[$exportSemester]['end'];
-            $exportLabel = (string)$semesterRanges[$exportSemester]['label'];
-        }
+    } elseif ($exportPeriod === 'school_year') {
+        $exportStartDate = (string)($exportSchoolYear['start_date'] ?? $syStartDate);
+        $exportEndDate = (string)($exportSchoolYear['end_date'] ?? $syEndDate);
+        $exportLabel = 'School Year';
     }
 
     if ($exportStartDate < $syStartDate) {
@@ -423,7 +497,7 @@ if (isset($_GET['export']) && $_GET['export'] === 'csv') {
     $params = [$exportStartDate, $exportEndDate];
 
     if ($hasSectionIdColumn && !empty($teacherSectionIds)) {
-        $scopedIds = $filterSectionId > 0 ? [$filterSectionId] : $teacherSectionIds;
+        $scopedIds = $exportSectionId > 0 ? [$exportSectionId] : $teacherSectionIds;
         $inClause = implode(',', array_fill(0, count($scopedIds), '?'));
         $exportSql .= " AND s.section_id IN ({$inClause})";
         $types .= str_repeat('i', count($scopedIds));
@@ -439,6 +513,12 @@ if (isset($_GET['export']) && $_GET['export'] === 'csv') {
         $exportSql .= " AND COALESCE(a.status, 'absent') = ?";
         $types .= 's';
         $params[] = $filter_status;
+    }
+
+    if ($exportYearLevel !== '') {
+        $exportSql .= ' AND CAST(s.year AS CHAR) = ?';
+        $types .= 's';
+        $params[] = $exportYearLevel;
     }
 
     $exportSql .= " ORDER BY a.attendance_date ASC, s.last_name ASC, s.first_name ASC";
@@ -496,40 +576,91 @@ if (isset($_GET['export']) && $_GET['export'] === 'csv') {
     $scopeFileToken = preg_replace('/[^a-z0-9_-]+/i', '_', strtolower($scopeLabel));
     $scopeFileToken = $scopeFileToken !== '' ? $scopeFileToken : 'teacher_scope';
 
-    header('Content-Type: text/csv; charset=UTF-8');
-    header('Content-Disposition: attachment; filename="' . rawurlencode($scopeFileToken) . '_attendance_' . $exportPeriod . '_' . $exportStartDate . '_to_' . $exportEndDate . '.csv"');
-
-    echo "\xEF\xBB\xBF";
-    $output = fopen('php://output', 'w');
-    fputcsv($output, ['Attendance Export']);
-    fputcsv($output, ['Period', ucfirst($exportPeriod)]);
-    fputcsv($output, ['School Year', $exportSchoolYearLabel !== '' ? $exportSchoolYearLabel : '-']);
-    fputcsv($output, ['Coverage', $exportLabel]);
-    fputcsv($output, ['Date Range', $exportRangeLabel]);
-    fputcsv($output, ['Scope', $scopeLabel]);
-    fputcsv($output, ['Sorted By', ucfirst($exportSortBy)]);
-    fputcsv($output, []);
-    fputcsv($output, ['#', 'Name', 'Date', 'AM In', 'AM Out', 'PM In', 'PM Out', 'Status', 'Notes']);
-
-    $rowNum = 1;
+    $fileBase = rawurlencode($scopeFileToken) . '_attendance_' . $exportPeriod . '_' . $exportStartDate . '_to_' . $exportEndDate;
+    $dailyRows = [];
     foreach ($exportData as $row) {
-        $date = $row['attendance_date'] ?? null;
-        if (!$date) {
-            $date = $exportStartDate;
-        }
-        fputcsv($output, [
-            $rowNum++,
+        $attendanceDate = trim((string)($row['attendance_date'] ?? ''));
+        $timeIn = (string)($row['time_in_am'] ?: ($row['time_in_pm'] ?: ''));
+        $timeOut = (string)($row['time_out_am'] ?: ($row['time_out_pm'] ?: ''));
+        $dailyRows[] = [
+            $attendanceDate !== '' ? date('Y-m-d', strtotime($attendanceDate)) : '-',
             $formatName($row),
-            $date,
-            $row['time_in_am'] ?: '',
-            $row['time_out_am'] ?: '',
-            $row['time_in_pm'] ?: '',
-            $row['time_out_pm'] ?: '',
-            $row['status'],
-            $row['notes'] ?? ''
-        ]);
+            $timeIn,
+            $timeOut,
+        ];
     }
 
+    $activeFilters = [];
+    if ($exportYearLevel !== '') {
+        $activeFilters[] = 'Year=' . $exportYearLevel;
+    }
+    if ($exportSectionId > 0) {
+        foreach ($sectionCatalog as $catalogRow) {
+            if ((int)$catalogRow['id'] === (int)$exportSectionId) {
+                $activeFilters[] = 'Section=' . (string)$catalogRow['label'];
+                break;
+            }
+        }
+    }
+    if ($filter_status !== '') {
+        $activeFilters[] = 'Remarks=' . $filter_status;
+    }
+
+    header('Content-Type: text/csv; charset=UTF-8');
+    header('Content-Disposition: attachment; filename="' . $fileBase . '.csv"');
+    echo "\xEF\xBB\xBF";
+    $output = fopen('php://output', 'w');
+    fputcsv($output, ['Attendance Logs Export']);
+    fputcsv($output, ['School Year', $exportSchoolYearLabel !== '' ? $exportSchoolYearLabel : '-']);
+    fputcsv($output, ['Export Scope', $scopeLabel]);
+    fputcsv($output, ['Export Period', ucwords(str_replace('_', ' ', $exportPeriod))]);
+    fputcsv($output, ['Date Range', $exportRangeLabel]);
+    fputcsv($output, ['Sorted By', ucfirst($exportSortBy)]);
+    fputcsv($output, ['Active Filters', empty($activeFilters) ? 'None' : implode(' | ', $activeFilters)]);
+    fputcsv($output, []);
+
+    if ($exportPeriod === 'school_year') {
+        $dateHeaders = [];
+        $ts = strtotime($exportStartDate);
+        $endTs = strtotime($exportEndDate);
+        while ($ts !== false && $endTs !== false && $ts <= $endTs) {
+            $dateHeaders[] = date('Y-m-d', $ts);
+            $ts = strtotime('+1 day', $ts);
+        }
+
+        fputcsv($output, array_merge(['#', 'Name'], $dateHeaders));
+
+        $byStudent = [];
+        foreach ($exportData as $row) {
+            $studentKey = (string)($row['student_pk'] ?? '0');
+            if (!isset($byStudent[$studentKey])) {
+                $byStudent[$studentKey] = [
+                    'name' => $formatName($row),
+                    'dates' => [],
+                ];
+            }
+
+            $date = trim((string)($row['attendance_date'] ?? ''));
+            if ($date !== '') {
+                $byStudent[$studentKey]['dates'][$date] = strtolower((string)($row['status'] ?? 'absent'));
+            }
+        }
+
+        $rowNo = 1;
+        foreach ($byStudent as $studentRow) {
+            $line = [$rowNo++, $studentRow['name']];
+            foreach ($dateHeaders as $dateHeader) {
+                $line[] = (string)($studentRow['dates'][$dateHeader] ?? 'absent');
+            }
+            fputcsv($output, $line);
+        }
+    } else {
+        fputcsv($output, ['#', 'Date', 'Name', 'Time In', 'Time Out']);
+        $rowNum = 1;
+        foreach ($dailyRows as $row) {
+            fputcsv($output, [$rowNum++, $row[0], $row[1], $row[2], $row[3]]);
+        }
+    }
     fclose($output);
     exit;
 }
@@ -577,7 +708,13 @@ if ($filter_status !== '') {
     $params[] = $filter_status;
 }
 
-$query .= " ORDER BY a.attendance_date DESC, s.last_name ASC, s.first_name ASC";
+if ($selectedYearLevel !== '') {
+    $query .= ' AND CAST(s.year AS CHAR) = ?';
+    $types .= 's';
+    $params[] = $selectedYearLevel;
+}
+
+$query .= " ORDER BY a.attendance_date ASC, s.last_name ASC, s.first_name ASC";
 
 $records = [];
 $stmt = $mysqli->prepare($query);
@@ -620,6 +757,12 @@ if ($hasSectionIdColumn && !empty($teacherSectionIds)) {
     $summaryParams[] = $section;
 }
 
+if ($selectedYearLevel !== '') {
+    $summarySql = str_replace('GROUP BY', 'AND CAST(s.year AS CHAR) = ? GROUP BY', $summarySql);
+    $summaryTypes .= 's';
+    $summaryParams[] = $selectedYearLevel;
+}
+
 $summaryStmt = $mysqli->prepare($summarySql);
 if ($summaryStmt) {
     $bind = [$summaryTypes];
@@ -652,44 +795,81 @@ require '../includes/header.php';
                 <div class="card-body py-3">
                     <form method="GET" class="row g-2 align-items-end">
                         <div class="col-md-2 col-6">
+                            <label class="form-label form-label-sm mb-1">School Year</label>
+                            <select name="school_year" class="form-select form-select-sm">
+                                <?php foreach ($schoolYears as $schoolYear): ?>
+                                <?php $schoolYearLabel = (string)($schoolYear['label'] ?? ''); ?>
+                                <option value="<?php echo htmlspecialchars($schoolYearLabel); ?>"
+                                    <?php echo $selectedContextSchoolYearLabel === $schoolYearLabel ? 'selected' : ''; ?>>
+                                    <?php echo htmlspecialchars($schoolYearLabel); ?>
+                                </option>
+                                <?php endforeach; ?>
+                            </select>
+                        </div>
+                        <div class="col-md-2 col-6">
                             <label class="form-label form-label-sm mb-1">From Date</label>
-                            <input type="date" name="start_date" class="form-control form-control-sm" value="<?php echo htmlspecialchars($filter_start_date); ?>" min="<?php echo htmlspecialchars($syStartDate); ?>" max="<?php echo htmlspecialchars($syEndDate); ?>">
+                            <input type="date" name="start_date" class="form-control form-control-sm"
+                                value="<?php echo htmlspecialchars($filter_start_date); ?>"
+                                min="<?php echo htmlspecialchars($syStartDate); ?>"
+                                max="<?php echo htmlspecialchars($syEndDate); ?>">
                         </div>
                         <div class="col-md-2 col-6">
                             <label class="form-label form-label-sm mb-1">To Date</label>
-                            <input type="date" name="end_date" class="form-control form-control-sm" value="<?php echo htmlspecialchars($filter_end_date); ?>" min="<?php echo htmlspecialchars($syStartDate); ?>" max="<?php echo htmlspecialchars($syEndDate); ?>">
+                            <input type="date" name="end_date" class="form-control form-control-sm"
+                                value="<?php echo htmlspecialchars($filter_end_date); ?>"
+                                min="<?php echo htmlspecialchars($syStartDate); ?>"
+                                max="<?php echo htmlspecialchars($syEndDate); ?>">
                         </div>
                         <div class="col-md-2 col-6">
                             <label class="form-label form-label-sm mb-1">Status</label>
                             <select name="status" class="form-select form-select-sm">
                                 <option value="">All</option>
-                                <option value="present" <?php echo $filter_status === 'present' ? 'selected' : ''; ?>>Present</option>
-                                <option value="late" <?php echo $filter_status === 'late' ? 'selected' : ''; ?>>Late</option>
-                                <option value="absent" <?php echo $filter_status === 'absent' ? 'selected' : ''; ?>>Absent</option>
-                                <option value="excused" <?php echo $filter_status === 'excused' ? 'selected' : ''; ?>>Excused</option>
+                                <option value="present" <?php echo $filter_status === 'present' ? 'selected' : ''; ?>>
+                                    Present</option>
+                                <option value="late" <?php echo $filter_status === 'late' ? 'selected' : ''; ?>>Late
+                                </option>
+                                <option value="absent" <?php echo $filter_status === 'absent' ? 'selected' : ''; ?>>
+                                    Absent</option>
+                                <option value="excused" <?php echo $filter_status === 'excused' ? 'selected' : ''; ?>>
+                                    Excused</option>
+                            </select>
+                        </div>
+                        <div class="col-md-2 col-6">
+                            <label class="form-label form-label-sm mb-1">Year Level</label>
+                            <select name="year_level" class="form-select form-select-sm">
+                                <option value="">All</option>
+                                <?php foreach ($yearLevelOptions as $yearLevelOption): ?>
+                                <option value="<?php echo htmlspecialchars($yearLevelOption); ?>"
+                                    <?php echo $selectedYearLevel === $yearLevelOption ? 'selected' : ''; ?>>
+                                    <?php echo htmlspecialchars($yearLevelOption); ?>
+                                </option>
+                                <?php endforeach; ?>
                             </select>
                         </div>
                         <?php if ($hasSectionIdColumn && !empty($sectionCatalog)): ?>
-                            <div class="col-md-3 col-6">
-                                <label class="form-label form-label-sm mb-1">Section Scope</label>
-                                <select name="section_id" class="form-select form-select-sm">
-                                    <option value="0" <?php echo $filterSectionId === 0 ? 'selected' : ''; ?>>All Assigned Sections</option>
-                                    <?php foreach ($sectionCatalog as $catalogRow): ?>
-                                        <option value="<?php echo (int)$catalogRow['id']; ?>" <?php echo $filterSectionId === (int)$catalogRow['id'] ? 'selected' : ''; ?>>
-                                            <?php echo htmlspecialchars((string)$catalogRow['label']); ?>
-                                        </option>
-                                    <?php endforeach; ?>
-                                </select>
-                            </div>
+                        <div class="col-md-3 col-6">
+                            <label class="form-label form-label-sm mb-1">Section Scope</label>
+                            <select name="section_id" class="form-select form-select-sm">
+                                <option value="0" <?php echo $filterSectionId === 0 ? 'selected' : ''; ?>>All Assigned
+                                    Sections</option>
+                                <?php foreach ($sectionCatalog as $catalogRow): ?>
+                                <option value="<?php echo (int)$catalogRow['id']; ?>"
+                                    <?php echo $filterSectionId === (int)$catalogRow['id'] ? 'selected' : ''; ?>>
+                                    <?php echo htmlspecialchars((string)$catalogRow['label']); ?>
+                                </option>
+                                <?php endforeach; ?>
+                            </select>
+                        </div>
                         <?php endif; ?>
-                        <div class="col-md-2 col-6">
+                        <div class="col-md-1 col-6">
                             <button type="submit" class="btn btn-primary btn-sm w-100">
                                 <i class="bi bi-search"></i> Filter
                             </button>
                         </div>
-                        <div class="col-md-3 col-12 text-md-end">
-                            <button type="button" class="btn btn-outline-success btn-sm w-100" data-bs-toggle="modal" data-bs-target="#exportModal">
-                                <i class="bi bi-download"></i> Export CSV
+                        <div class="col-md-2 col-12 text-md-end">
+                            <button type="button" class="btn btn-outline-success btn-sm w-100" data-bs-toggle="modal"
+                                data-bs-target="#exportModal">
+                                <i class="bi bi-download"></i> Export
                             </button>
                         </div>
                     </form>
@@ -741,49 +921,54 @@ require '../includes/header.php';
                 </div>
                 <div class="card-body">
                     <?php if (count($records) > 0): ?>
-                        <div class="table-responsive">
-                            <table class="table table-hover table-sm align-middle">
-                                <thead>
-                                    <tr>
-                                        <th>No.</th>
-                                        <th>Name</th>
-                                        <th>Date</th>
-                                        <th>AM In</th>
-                                        <th>AM Out</th>
-                                        <th>PM In</th>
-                                        <th>PM Out</th>
-                                        <th>Status</th>
-                                    </tr>
-                                </thead>
-                                <tbody>
-                                    <?php $rowNumber = 1; foreach ($records as $record): ?>
-                                        <tr>
-                                            <td><?php echo $rowNumber++; ?></td>
-                                            <td><?php echo htmlspecialchars(formatAttendanceHistoryName($record)); ?></td>
-                                            <td><?php echo date('M d, Y', strtotime((string)$record['attendance_date'])); ?></td>
-                                            <td><?php echo $record['time_in_am'] ? date('H:i', strtotime($record['time_in_am'])) : '-'; ?></td>
-                                            <td><?php echo $record['time_out_am'] ? date('H:i', strtotime($record['time_out_am'])) : '-'; ?></td>
-                                            <td><?php echo $record['time_in_pm'] ? date('H:i', strtotime($record['time_in_pm'])) : '-'; ?></td>
-                                            <td><?php echo $record['time_out_pm'] ? date('H:i', strtotime($record['time_out_pm'])) : '-'; ?></td>
-                                            <td>
-                                                <span class="badge <?php
+                    <div class="table-responsive">
+                        <table class="table table-hover table-sm align-middle">
+                            <thead>
+                                <tr>
+                                    <th>No.</th>
+                                    <th>Name</th>
+                                    <th>Date</th>
+                                    <th>AM In</th>
+                                    <th>AM Out</th>
+                                    <th>PM In</th>
+                                    <th>PM Out</th>
+                                    <th>Status</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <?php $rowNumber = 1; foreach ($records as $record): ?>
+                                <tr>
+                                    <td><?php echo $rowNumber++; ?></td>
+                                    <td><?php echo htmlspecialchars(formatAttendanceHistoryName($record)); ?></td>
+                                    <td><?php echo date('M d, Y', strtotime((string)$record['attendance_date'])); ?>
+                                    </td>
+                                    <td><?php echo $record['time_in_am'] ? date('H:i', strtotime($record['time_in_am'])) : '-'; ?>
+                                    </td>
+                                    <td><?php echo $record['time_out_am'] ? date('H:i', strtotime($record['time_out_am'])) : '-'; ?>
+                                    </td>
+                                    <td><?php echo $record['time_in_pm'] ? date('H:i', strtotime($record['time_in_pm'])) : '-'; ?>
+                                    </td>
+                                    <td><?php echo $record['time_out_pm'] ? date('H:i', strtotime($record['time_out_pm'])) : '-'; ?>
+                                    </td>
+                                    <td>
+                                        <span class="badge <?php
                                                     if ($record['status'] === 'present') echo 'badge-success';
                                                     elseif ($record['status'] === 'late') echo 'badge-warning';
                                                     elseif ($record['status'] === 'absent') echo 'badge-danger';
                                                     else echo 'badge-secondary';
                                                 ?>">
-                                                    <?php echo ucfirst($record['status']); ?>
-                                                </span>
-                                            </td>
-                                        </tr>
-                                    <?php endforeach; ?>
-                                </tbody>
-                            </table>
-                        </div>
+                                            <?php echo ucfirst($record['status']); ?>
+                                        </span>
+                                    </td>
+                                </tr>
+                                <?php endforeach; ?>
+                            </tbody>
+                        </table>
+                    </div>
                     <?php else: ?>
-                        <div class="alert alert-info">
-                            <i class="bi bi-info-circle"></i> No attendance records found
-                        </div>
+                    <div class="alert alert-info">
+                        <i class="bi bi-info-circle"></i> No attendance records found
+                    </div>
                     <?php endif; ?>
                 </div>
             </div>
@@ -793,7 +978,7 @@ require '../includes/header.php';
 
 <!-- Export Modal -->
 <div class="modal fade" id="exportModal" tabindex="-1" aria-hidden="true">
-    <div class="modal-dialog modal-md modal-dialog-centered">
+    <div class="modal-dialog modal-xl modal-dialog-centered">
         <div class="modal-content">
             <div class="modal-header">
                 <h5 class="modal-title"><i class="bi bi-download"></i> Export Attendance</h5>
@@ -801,21 +986,35 @@ require '../includes/header.php';
             </div>
             <form method="GET">
                 <div class="modal-body">
-                    <input type="hidden" name="export" value="csv">
+                    <input type="hidden" name="school_year"
+                        value="<?php echo htmlspecialchars($selectedContextSchoolYearLabel); ?>">
                     <input type="hidden" name="status" value="<?php echo htmlspecialchars($filter_status); ?>">
-                    <input type="hidden" name="section_id" value="<?php echo (int)$filterSectionId; ?>">
 
                     <div class="row g-3">
-                        <div class="col-12">
+                        <div class="col-md-6">
                             <h6 class="mb-3"><i class="bi bi-calendar-range"></i> Coverage</h6>
 
                             <div class="mb-3">
                                 <label for="export_period" class="form-label">Export Period</label>
                                 <select class="form-select" id="export_period" name="export_period">
-                                    <option value="daily" <?php echo $selectedExportPeriod === 'daily' ? 'selected' : ''; ?>>Daily</option>
-                                    <option value="weekly" <?php echo $selectedExportPeriod === 'weekly' ? 'selected' : ''; ?>>Weekly</option>
-                                    <option value="monthly" <?php echo $selectedExportPeriod === 'monthly' ? 'selected' : ''; ?>>Monthly</option>
-                                    <option value="semester" <?php echo $selectedExportPeriod === 'semester' ? 'selected' : ''; ?>>Per Semester</option>
+                                    <option value="daily"
+                                        <?php echo $selectedExportPeriod === 'daily' ? 'selected' : ''; ?>>Daily
+                                    </option>
+                                    <option value="school_year"
+                                        <?php echo $selectedExportPeriod === 'school_year' ? 'selected' : ''; ?>>School
+                                        Year</option>
+                                </select>
+                            </div>
+
+                            <div class="mb-3" id="dailyModeGroup">
+                                <label for="daily_mode" class="form-label">Daily Mode</label>
+                                <select class="form-select" id="daily_mode" name="daily_mode">
+                                    <option value="exact"
+                                        <?php echo $selectedDailyMode === 'exact' ? 'selected' : ''; ?>>Exact Date
+                                    </option>
+                                    <option value="range"
+                                        <?php echo $selectedDailyMode === 'range' ? 'selected' : ''; ?>>Date Range
+                                    </option>
                                 </select>
                             </div>
 
@@ -823,43 +1022,64 @@ require '../includes/header.php';
                                 <label for="export_school_year" class="form-label">School Year</label>
                                 <select class="form-select" id="export_school_year" name="export_school_year">
                                     <?php foreach ($schoolYears as $schoolYear): ?>
-                                        <?php $schoolYearLabel = (string)($schoolYear['label'] ?? ''); ?>
-                                        <option value="<?php echo htmlspecialchars($schoolYearLabel); ?>" <?php echo $selectedExportSchoolYearLabel === $schoolYearLabel ? 'selected' : ''; ?>>
-                                            <?php echo htmlspecialchars($schoolYearLabel); ?>
-                                        </option>
+                                    <?php $schoolYearLabel = (string)($schoolYear['label'] ?? ''); ?>
+                                    <option value="<?php echo htmlspecialchars($schoolYearLabel); ?>"
+                                        <?php echo $selectedExportSchoolYearLabel === $schoolYearLabel ? 'selected' : ''; ?>>
+                                        <?php echo htmlspecialchars($schoolYearLabel); ?>
+                                    </option>
                                     <?php endforeach; ?>
                                 </select>
                             </div>
 
-                            <div class="mb-3" id="exportDailyGroup" style="display:none;">
-                                <label for="export_date" class="form-label">Date</label>
-                                <input type="date" class="form-control" id="export_date" name="export_date" value="<?php echo htmlspecialchars($selectedExportDate); ?>">
+                            <div class="mb-3" id="exportDailyExactGroup" style="display:none;">
+                                <label for="export_date" class="form-label">Exact Date</label>
+                                <input type="date" class="form-control" id="export_date" name="export_date"
+                                    value="<?php echo htmlspecialchars($selectedExportDate); ?>">
                             </div>
 
-                            <div class="mb-3" id="exportWeeklyGroup" style="display:none;">
-                                <label for="export_week_start" class="form-label">Week Start</label>
-                                <input type="date" class="form-control" id="export_week_start" name="export_week_start" value="<?php echo htmlspecialchars($selectedExportWeekStart); ?>">
-                                <small class="text-muted">Export will include the 7-day span starting from this date.</small>
+                            <div class="row g-2 mb-3" id="exportDailyRangeGroup" style="display:none;">
+                                <div class="col-6">
+                                    <label for="export_start_date" class="form-label">Start Date</label>
+                                    <input type="date" class="form-control" id="export_start_date"
+                                        name="export_start_date"
+                                        value="<?php echo htmlspecialchars($selectedExportStartDate); ?>">
+                                </div>
+                                <div class="col-6">
+                                    <label for="export_end_date" class="form-label">End Date</label>
+                                    <input type="date" class="form-control" id="export_end_date" name="export_end_date"
+                                        value="<?php echo htmlspecialchars($selectedExportEndDate); ?>">
+                                </div>
                             </div>
 
-                            <div class="mb-3" id="exportMonthlyGroup" style="display:none;">
-                                <label for="export_month_start" class="form-label">Month</label>
-                                <select class="form-select" id="export_month_start" name="export_month_start">
-                                    <?php foreach (buildSchoolYearMonthOptions($activeSchoolYear) as $monthOption): ?>
-                                        <option value="<?php echo htmlspecialchars($monthOption['value']); ?>" <?php echo $selectedExportMonthStart === $monthOption['value'] ? 'selected' : ''; ?>>
-                                            <?php echo htmlspecialchars($monthOption['label']); ?>
+                            <div class="row g-2 mb-2">
+                                <div class="col-6">
+                                    <label for="export_year_level" class="form-label">Year Level</label>
+                                    <select class="form-select" id="export_year_level" name="export_year_level">
+                                        <option value="">All</option>
+                                        <?php foreach ($yearLevelOptions as $yearLevelOption): ?>
+                                        <option value="<?php echo htmlspecialchars($yearLevelOption); ?>"
+                                            <?php echo $selectedExportYearLevel === $yearLevelOption ? 'selected' : ''; ?>>
+                                            <?php echo htmlspecialchars($yearLevelOption); ?>
                                         </option>
-                                    <?php endforeach; ?>
-                                </select>
-                            </div>
-
-                            <div class="mb-3" id="exportSemesterGroup" style="display:none;">
-                                <label for="semester" class="form-label">Semester</label>
-                                <select class="form-select" id="semester" name="semester">
-                                    <option value="1" <?php echo $selectedExportSemester === 1 ? 'selected' : ''; ?>>Semester 1</option>
-                                    <option value="2" <?php echo $selectedExportSemester === 2 ? 'selected' : ''; ?>>Semester 2</option>
-                                </select>
-                                <small class="text-muted d-block mt-2">Semester dates are derived from the selected school year in the database.</small>
+                                        <?php endforeach; ?>
+                                    </select>
+                                </div>
+                                <div class="col-6">
+                                    <label for="export_section_id" class="form-label">Section</label>
+                                    <?php if (!empty($sectionCatalog)): ?>
+                                        <select class="form-select" id="export_section_id" name="export_section_id">
+                                            <?php foreach ($sectionCatalog as $catalogRow): ?>
+                                            <option value="<?php echo (int)$catalogRow['id']; ?>"
+                                                data-year-level="<?php echo htmlspecialchars((string)($catalogRow['year_grade'] ?? '')); ?>"
+                                                <?php echo $selectedExportSectionId === (int)$catalogRow['id'] ? 'selected' : ''; ?>>
+                                                <?php echo htmlspecialchars((string)$catalogRow['label']); ?>
+                                            </option>
+                                            <?php endforeach; ?>
+                                        </select>
+                                    <?php else: ?>
+                                        <input type="text" class="form-control" value="<?php echo htmlspecialchars($scopeLabel); ?>" readonly>
+                                    <?php endif; ?>
+                                </div>
                             </div>
 
                             <small class="text-muted d-block mt-2">
@@ -867,26 +1087,22 @@ require '../includes/header.php';
                             </small>
                         </div>
 
-                        <div class="col-12">
-                            <hr class="my-2">
-                        </div>
-
-                        <div class="col-12">
+                        <div class="col-md-6">
                             <h6 class="mb-3"><i class="bi bi-sort-down"></i> Sort Options</h6>
-                            
+
                             <div class="mb-3">
                                 <label for="export_sort_by" class="form-label">Sort By</label>
                                 <select class="form-select" id="export_sort_by" name="export_sort_by">
-                                    <option value="date">Date (Default)</option>
-                                    <option value="name">Student Name</option>
+                                    <option value="date" <?php echo $selectedExportSortBy === 'date' ? 'selected' : ''; ?>>Date (Default)</option>
+                                    <option value="name" <?php echo $selectedExportSortBy === 'name' ? 'selected' : ''; ?>>Student Name</option>
                                 </select>
                             </div>
 
                             <div class="mb-3">
                                 <label for="export_name_format" class="form-label">Name Format</label>
                                 <select class="form-select" id="export_name_format" name="export_name_format">
-                                    <option value="last_name_first">Last Name, First Name</option>
-                                    <option value="full_name">First Name Last Name</option>
+                                    <option value="last_name_first" <?php echo $selectedExportNameFormat === 'last_name_first' ? 'selected' : ''; ?>>Last Name, First Name</option>
+                                    <option value="full_name" <?php echo $selectedExportNameFormat === 'full_name' ? 'selected' : ''; ?>>First Name Last Name</option>
                                 </select>
                             </div>
                         </div>
@@ -894,21 +1110,33 @@ require '../includes/header.php';
                 </div>
                 <div class="modal-footer">
                     <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
-                    <button type="submit" class="btn btn-success"><i class="bi bi-download"></i> Export CSV</button>
+                    <button type="submit" class="btn btn-success" id="teacherExportCsvBtn" name="export" value="csv"><i
+                            class="bi bi-filetype-csv"></i> Export CSV</button>
                 </div>
+                <small class="text-danger d-block px-3 pb-2" id="teacherExportValidationHint"
+                    style="display:none;"></small>
             </form>
         </div>
     </div>
 </div>
 
 <script>
-document.addEventListener('DOMContentLoaded', function () {
+document.addEventListener('DOMContentLoaded', function() {
     const periodSelect = document.getElementById('export_period');
+    const dailyModeSelect = document.getElementById('daily_mode');
     const schoolYearGroup = document.getElementById('exportSchoolYearGroup');
-    const dailyGroup = document.getElementById('exportDailyGroup');
-    const weeklyGroup = document.getElementById('exportWeeklyGroup');
-    const monthlyGroup = document.getElementById('exportMonthlyGroup');
-    const semesterGroup = document.getElementById('exportSemesterGroup');
+    const dailyModeGroup = document.getElementById('dailyModeGroup');
+    const dailyExactGroup = document.getElementById('exportDailyExactGroup');
+    const dailyRangeGroup = document.getElementById('exportDailyRangeGroup');
+    const exportSchoolYear = document.getElementById('export_school_year');
+    const exportYearLevel = document.getElementById('export_year_level');
+    const exportSectionId = document.getElementById('export_section_id');
+    const exportDate = document.getElementById('export_date');
+    const exportStartDate = document.getElementById('export_start_date');
+    const exportEndDate = document.getElementById('export_end_date');
+    const exportCsvBtn = document.getElementById('teacherExportCsvBtn');
+    const exportValidationHint = document.getElementById('teacherExportValidationHint');
+    const exportForm = periodSelect.closest('form');
 
     if (!periodSelect) {
         return;
@@ -916,31 +1144,112 @@ document.addEventListener('DOMContentLoaded', function () {
 
     const updatePeriodControls = () => {
         const period = periodSelect.value;
+        const dailyMode = dailyModeSelect ? dailyModeSelect.value : 'exact';
 
         if (schoolYearGroup) {
             schoolYearGroup.style.display = '';
         }
-        if (dailyGroup) {
-            dailyGroup.style.display = period === 'daily' ? '' : 'none';
+        if (dailyModeGroup) {
+            dailyModeGroup.style.display = period === 'daily' ? '' : 'none';
         }
-        if (weeklyGroup) {
-            weeklyGroup.style.display = period === 'weekly' ? '' : 'none';
+        if (dailyExactGroup) {
+            dailyExactGroup.style.display = period === 'daily' && dailyMode === 'exact' ? '' : 'none';
         }
-        if (monthlyGroup) {
-            monthlyGroup.style.display = period === 'monthly' ? '' : 'none';
+        if (dailyRangeGroup) {
+            dailyRangeGroup.style.display = period === 'daily' && dailyMode === 'range' ? '' : 'none';
         }
-        if (semesterGroup) {
-            semesterGroup.style.display = period === 'semester' ? '' : 'none';
+
+        applyExportButtonState();
+    };
+
+    const getValidationError = () => {
+        const period = periodSelect.value;
+        const dailyMode = dailyModeSelect ? dailyModeSelect.value : 'exact';
+
+        if (exportSchoolYear && exportSchoolYear.value.trim() === '') {
+            return 'Select a school year before exporting.';
         }
+
+        if (period === 'daily') {
+            if (dailyMode === 'exact') {
+                if (!exportDate || exportDate.value.trim() === '') {
+                    return 'Select an exact date before exporting.';
+                }
+            } else if (dailyMode === 'range') {
+                const start = exportStartDate ? exportStartDate.value.trim() : '';
+                const end = exportEndDate ? exportEndDate.value.trim() : '';
+                if (start === '' || end === '') {
+                    return 'Select both start and end dates before exporting.';
+                }
+                if (start > end) {
+                    return 'Date range is invalid: start date must be earlier than end date.';
+                }
+            }
+        }
+
+        if (exportYearLevel && exportSectionId && exportSectionId.value !== '0' && exportYearLevel.value !==
+            '') {
+            const selectedSectionOption = exportSectionId.options[exportSectionId.selectedIndex];
+            const sectionYear = selectedSectionOption ? (selectedSectionOption.getAttribute(
+                'data-year-level') || '') : '';
+            if (sectionYear !== '' && sectionYear !== exportYearLevel.value) {
+                return 'Selected section does not match selected year level.';
+            }
+        }
+
+        return '';
+    };
+
+    const applyExportButtonState = () => {
+        if (!exportCsvBtn || !exportValidationHint) {
+            return;
+        }
+
+        const error = getValidationError();
+        const isValid = error === '';
+        exportCsvBtn.disabled = !isValid;
+        exportValidationHint.textContent = error;
+        exportValidationHint.style.display = isValid ? 'none' : '';
     };
 
     periodSelect.addEventListener('change', updatePeriodControls);
+    if (dailyModeSelect) {
+        dailyModeSelect.addEventListener('change', updatePeriodControls);
+    }
+    if (exportSchoolYear) {
+        exportSchoolYear.addEventListener('change', updatePeriodControls);
+    }
+    if (exportYearLevel) {
+        exportYearLevel.addEventListener('change', updatePeriodControls);
+    }
+    if (exportSectionId) {
+        exportSectionId.addEventListener('change', updatePeriodControls);
+    }
+    if (exportDate) {
+        exportDate.addEventListener('change', updatePeriodControls);
+    }
+    if (exportStartDate) {
+        exportStartDate.addEventListener('change', updatePeriodControls);
+    }
+    if (exportEndDate) {
+        exportEndDate.addEventListener('change', updatePeriodControls);
+    }
+    if (exportForm) {
+        exportForm.addEventListener('submit', function(event) {
+            const error = getValidationError();
+            if (error !== '') {
+                event.preventDefault();
+                applyExportButtonState();
+            }
+        });
+    }
+
     updatePeriodControls();
 });
 </script>
 
 <?php require '../includes/footer.php'; /*
- * © 2026 TambyTech.
+ * ï¿½ 2026 TambyTech.
  * This source code is proprietary and confidential.
  * Any unauthorized use, copying, modification, distribution, or disclosure is strictly prohibited.
  * All rights reserved.

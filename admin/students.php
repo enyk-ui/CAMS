@@ -191,9 +191,32 @@ $message_type = '';
 // Handle DELETE
 if (isset($_GET['delete'])) {
     $student_id = (int)$_GET['delete'];
-    $mysqli->query("DELETE FROM students WHERE id = $student_id");
-    $message = "Student deleted successfully!";
-    $message_type = "success";
+    if ($student_id <= 0) {
+        $message = 'Invalid student id.';
+        $message_type = 'danger';
+    } else {
+        $attendanceStmt = $mysqli->prepare('SELECT id FROM attendance WHERE student_id = ? LIMIT 1');
+        $attendanceStmt->bind_param('i', $student_id);
+        $attendanceStmt->execute();
+        $hasAttendance = $attendanceStmt->get_result()->fetch_assoc();
+        $attendanceStmt->close();
+
+        if ($hasAttendance) {
+            $message = 'Delete blocked: student has attendance records.';
+            $message_type = 'danger';
+        } else {
+            $deleteStmt = $mysqli->prepare('DELETE FROM students WHERE id = ? LIMIT 1');
+            $deleteStmt->bind_param('i', $student_id);
+            if ($deleteStmt->execute()) {
+                $message = 'Student deleted successfully!';
+                $message_type = 'success';
+            } else {
+                $message = 'Unable to delete student.';
+                $message_type = 'danger';
+            }
+            $deleteStmt->close();
+        }
+    }
 }
 
 // Get all students with linked fingerprint summary.
@@ -244,7 +267,7 @@ $result = $mysqli->query("
         {$fingerprintListExpr} AS fingerprint_list
     FROM students s 
     {$fingerprintJoinSql}
-    ORDER BY s.created_at DESC
+    ORDER BY s.last_name ASC, s.first_name ASC, s.id ASC
 ");
 
 while ($row = $result->fetch_assoc()) {
@@ -252,20 +275,61 @@ while ($row = $result->fetch_assoc()) {
 }
 
 $sections = [];
+$years = [];
 foreach ($students as $row) {
+    $year = trim((string)($row['year'] ?? ''));
+    if ($year !== '') {
+        $years[$year] = true;
+    }
+
     $section = trim((string)($row['section'] ?? ''));
     if ($section !== '') {
         $sections[$section] = true;
     }
 }
+$years = array_keys($years);
+sort($years, SORT_NATURAL | SORT_FLAG_CASE);
 $sections = array_keys($sections);
 sort($sections, SORT_NATURAL | SORT_FLAG_CASE);
 
+$studentListYearFilter = trim((string)($_GET['list_year'] ?? ''));
 $studentListSectionFilter = trim((string)($_GET['list_section'] ?? ''));
+
+$filteredStudents = $students;
+if ($studentListYearFilter !== '') {
+    $filteredStudents = array_values(array_filter($filteredStudents, function (array $row) use ($studentListYearFilter): bool {
+        return (string)($row['year'] ?? '') === $studentListYearFilter;
+    }));
+}
 if ($studentListSectionFilter !== '') {
-    $students = array_values(array_filter($students, function (array $row) use ($studentListSectionFilter): bool {
+    $filteredStudents = array_values(array_filter($filteredStudents, function (array $row) use ($studentListSectionFilter): bool {
         return strcasecmp(trim((string)($row['section'] ?? '')), $studentListSectionFilter) === 0;
     }));
+}
+$students = $filteredStudents;
+
+if ($studentListYearFilter !== '') {
+    $sectionsForSelectedYear = [];
+    foreach ($filteredStudents as $row) {
+        $section = trim((string)($row['section'] ?? ''));
+        if ($section !== '') {
+            $sectionsForSelectedYear[$section] = true;
+        }
+    }
+    if (!empty($sectionsForSelectedYear)) {
+        $sections = array_keys($sectionsForSelectedYear);
+        sort($sections, SORT_NATURAL | SORT_FLAG_CASE);
+    }
+}
+
+if ($studentListSectionFilter !== '' && !in_array($studentListSectionFilter, $sections, true)) {
+    $sections[] = $studentListSectionFilter;
+    sort($sections, SORT_NATURAL | SORT_FLAG_CASE);
+}
+
+if ($studentListYearFilter !== '' && !in_array($studentListYearFilter, $years, true)) {
+    $years[] = $studentListYearFilter;
+    sort($years, SORT_NATURAL | SORT_FLAG_CASE);
 }
 
 if (($_GET['export'] ?? '') === 'csv') {
@@ -357,9 +421,20 @@ if (($_GET['export'] ?? '') === 'csv') {
         </div>
     </div>
     <div class="card-body">
-        <form method="GET" class="row g-2 align-items-end mb-3">
-            <div class="col-md-4 col-sm-6">
-                <label for="list_section" class="form-label">Section Filter</label>
+        <form method="GET" class="row g-2 align-items-end mb-3 student-filter-bar">
+            <div class="col-lg-3 col-md-4 col-sm-6">
+                <label for="list_year" class="form-label">Year</label>
+                <select class="form-select" id="list_year" name="list_year">
+                    <option value="">All Years</option>
+                    <?php foreach ($years as $year): ?>
+                        <option value="<?php echo htmlspecialchars($year); ?>" <?php echo $studentListYearFilter === (string)$year ? 'selected' : ''; ?>>
+                            Year <?php echo htmlspecialchars($year); ?>
+                        </option>
+                    <?php endforeach; ?>
+                </select>
+            </div>
+            <div class="col-lg-3 col-md-4 col-sm-6">
+                <label for="list_section" class="form-label">Section</label>
                 <select class="form-select" id="list_section" name="list_section">
                     <option value="">All Sections</option>
                     <?php foreach ($sections as $section): ?>
@@ -369,10 +444,10 @@ if (($_GET['export'] ?? '') === 'csv') {
                     <?php endforeach; ?>
                 </select>
             </div>
-            <div class="col-md-2 col-sm-3">
+            <div class="col-lg-2 col-md-2 col-sm-3">
                 <button type="submit" class="btn btn-primary w-100">Apply</button>
             </div>
-            <div class="col-md-2 col-sm-3">
+            <div class="col-lg-2 col-md-2 col-sm-3">
                 <a href="students.php" class="btn btn-outline-secondary w-100">Reset</a>
             </div>
         </form>
@@ -433,79 +508,79 @@ if (($_GET['export'] ?? '') === 'csv') {
 </div>
 
 <div class="modal fade" id="smartStudentExportModal" tabindex="-1" aria-hidden="true">
-    <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-dialog modal-dialog-centered student-export-modal-dialog">
         <div class="modal-content">
             <div class="modal-header">
-                <h5 class="modal-title"><i class="bi bi-funnel"></i> Smart Export Filter</h5>
+                <h6 class="modal-title mb-0"><i class="bi bi-funnel"></i> Smart Export Filter</h6>
                 <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
             </div>
             <form method="GET">
-                <div class="modal-body">
+                <div class="modal-body student-export-modal-body">
                     <input type="hidden" name="export" value="csv">
 
-                    <div class="mb-3">
-                        <label for="student_export_scope" class="form-label">Export Scope</label>
-                        <select class="form-select" id="student_export_scope" name="export_scope">
-                            <option value="all" selected>All Students</option>
-                            <option value="school_year">By School Year (teacher assignments)</option>
-                            <option value="section">By Section (optional SY)</option>
-                        </select>
-                    </div>
-
-                    <div class="mb-3">
-                        <label for="student_export_sort_by" class="form-label">Sort By</label>
-                        <div class="row g-2">
-                            <div class="col-8">
-                                <select class="form-select" id="student_export_sort_by" name="export_sort_by">
-                                    <option value="date">Date</option>
-                                    <option value="last_name" selected>Last name</option>
-                                    <option value="first_name">First name</option>
-                                    <option value="year_section">Year/Section</option>
-                                    <option value="remark">Remark</option>
-                                </select>
-                            </div>
-                            <div class="col-4">
-                                <select class="form-select" id="student_export_sort_dir" name="export_sort_dir">
-                                    <option value="asc">Asc</option>
-                                    <option value="desc" selected>Desc</option>
-                                </select>
-                            </div>
+                    <div class="row g-2 student-export-grid">
+                        <div class="col-12">
+                            <label for="student_export_scope" class="form-label">Export Scope</label>
+                            <select class="form-select" id="student_export_scope" name="export_scope">
+                                <option value="all" selected>All Students</option>
+                                <option value="school_year">By School Year (teacher assignments)</option>
+                                <option value="section">By Section (optional SY)</option>
+                            </select>
                         </div>
-                    </div>
 
-                    <div class="mb-3">
-                        <label for="student_export_name_format" class="form-label">Name Format</label>
-                        <select class="form-select" id="student_export_name_format" name="export_name_format">
-                            <option value="full_name">Full name (First name MI Last name Ext)</option>
-                            <option value="last_name_first" selected>Last name, First name MI Ext</option>
-                        </select>
-                    </div>
+                        <div class="col-sm-6" id="studentExportSchoolYearGroup" style="display:none;">
+                            <label for="student_export_school_year" class="form-label">School Year</label>
+                            <select class="form-select" id="student_export_school_year" name="export_school_year">
+                                <option value="">Select school year</option>
+                                <?php foreach ($schoolYears as $sy): ?>
+                                    <option value="<?php echo htmlspecialchars((string)$sy['label']); ?>" <?php echo ((string)$sy['label'] === (string)($activeSchoolYear['label'] ?? '')) ? 'selected' : ''; ?>>
+                                        <?php echo htmlspecialchars((string)$sy['label']); ?>
+                                    </option>
+                                <?php endforeach; ?>
+                            </select>
+                        </div>
 
-                    <div class="mb-3" id="studentExportSchoolYearGroup" style="display:none;">
-                        <label for="student_export_school_year" class="form-label">School Year</label>
-                        <select class="form-select" id="student_export_school_year" name="export_school_year">
-                            <option value="">Select school year</option>
-                            <?php foreach ($schoolYears as $sy): ?>
-                                <option value="<?php echo htmlspecialchars((string)$sy['label']); ?>" <?php echo ((string)$sy['label'] === (string)($activeSchoolYear['label'] ?? '')) ? 'selected' : ''; ?>>
-                                    <?php echo htmlspecialchars((string)$sy['label']); ?>
-                                </option>
-                            <?php endforeach; ?>
-                        </select>
-                    </div>
+                        <div class="col-sm-6" id="studentExportSectionGroup" style="display:none;">
+                            <label for="student_export_section" class="form-label">Section</label>
+                            <select class="form-select" id="student_export_section" name="export_section">
+                                <option value="">Select section</option>
+                                <?php foreach ($sections as $section): ?>
+                                    <option value="<?php echo htmlspecialchars($section); ?>"><?php echo htmlspecialchars($section); ?></option>
+                                <?php endforeach; ?>
+                            </select>
+                        </div>
 
-                    <div class="mb-0" id="studentExportSectionGroup" style="display:none;">
-                        <label for="student_export_section" class="form-label">Section</label>
-                        <select class="form-select" id="student_export_section" name="export_section">
-                            <option value="">Select section</option>
-                            <?php foreach ($sections as $section): ?>
-                                <option value="<?php echo htmlspecialchars($section); ?>"><?php echo htmlspecialchars($section); ?></option>
-                            <?php endforeach; ?>
-                        </select>
+                        <div class="col-8" id="studentExportSortGroup">
+                            <label for="student_export_sort_by" class="form-label">Sort By</label>
+                            <select class="form-select" id="student_export_sort_by" name="export_sort_by">
+                                <option value="date">Date</option>
+                                <option value="last_name" selected>Last name</option>
+                                <option value="first_name">First name</option>
+                                <option value="year_section">Year/Section</option>
+                                <option value="remark">Remark</option>
+                            </select>
+                        </div>
+
+                        <div class="col-4" id="studentExportSortDirGroup">
+                            <label for="student_export_sort_dir" class="form-label">Dir</label>
+                            <select class="form-select" id="student_export_sort_dir" name="export_sort_dir">
+                                <option value="asc">Asc</option>
+                                <option value="desc" selected>Desc</option>
+                            </select>
+                        </div>
+
+                        <div class="col-12" id="studentExportNameFormatGroup">
+                            <label for="student_export_name_format" class="form-label">Name Format</label>
+                            <select class="form-select" id="student_export_name_format" name="export_name_format">
+                                <option value="full_name">Full name (First name MI Last name Ext)</option>
+                                <option value="last_name_first" selected>Last name, First name MI Ext</option>
+                            </select>
+                        </div>
                     </div>
                 </div>
                 <div class="modal-footer">
-                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
-                    <button type="submit" class="btn btn-success"><i class="bi bi-download"></i> Export</button>
+                    <button type="button" class="btn btn-sm btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                    <button type="submit" class="btn btn-sm btn-success"><i class="bi bi-download"></i> Export</button>
                 </div>
             </form>
         </div>
@@ -534,6 +609,62 @@ if (($_GET['export'] ?? '') === 'csv') {
         padding: 0.4rem 0.6rem;
         font-size: 0.85rem;
     }
+
+    .student-filter-bar {
+        margin-bottom: 0.75rem !important;
+    }
+
+    .student-filter-bar .form-label {
+        font-size: 0.9rem;
+        margin-bottom: 0.3rem;
+    }
+
+    .student-filter-bar .form-select,
+    .student-filter-bar .btn {
+        min-height: 36px;
+        padding-top: 0.25rem;
+        padding-bottom: 0.25rem;
+        font-size: 0.9rem;
+    }
+
+    .student-export-modal-dialog {
+        max-width: 440px;
+    }
+
+    #smartStudentExportModal .modal-header,
+    #smartStudentExportModal .modal-body,
+    #smartStudentExportModal .modal-footer {
+        padding: 0.65rem 0.8rem;
+    }
+
+    #smartStudentExportModal .modal-header {
+        border-bottom-width: 1px;
+    }
+
+    #smartStudentExportModal .form-label {
+        font-size: 0.85rem;
+        margin-bottom: 0.2rem;
+    }
+
+    #smartStudentExportModal .form-select {
+        min-height: 32px;
+        padding-top: 0.2rem;
+        padding-bottom: 0.2rem;
+        font-size: 0.85rem;
+    }
+
+    #smartStudentExportModal .modal-footer {
+        gap: 0.35rem;
+    }
+
+    #smartStudentExportModal .student-export-grid {
+        row-gap: 0.45rem !important;
+    }
+
+    #smartStudentExportModal .btn-sm {
+        font-size: 0.8rem;
+        padding: 0.3rem 0.55rem;
+    }
 </style>
 
 <script>
@@ -542,10 +673,11 @@ document.addEventListener('DOMContentLoaded', function () {
     const exportSection = document.getElementById('student_export_section');
     const schoolYearGroup = document.getElementById('studentExportSchoolYearGroup');
     const sectionGroup = document.getElementById('studentExportSectionGroup');
-    const sortByGroup = document.getElementById('student_export_sort_by')?.closest('.mb-3');
-    const nameFormatGroup = document.getElementById('student_export_name_format')?.closest('.mb-3');
+    const sortByGroup = document.getElementById('studentExportSortGroup');
+    const sortDirGroup = document.getElementById('studentExportSortDirGroup');
+    const nameFormatGroup = document.getElementById('studentExportNameFormatGroup');
 
-    if (!exportScope || !exportSection || !schoolYearGroup || !sectionGroup || !sortByGroup || !nameFormatGroup) {
+    if (!exportScope || !exportSection || !schoolYearGroup || !sectionGroup || !sortByGroup || !sortDirGroup || !nameFormatGroup) {
         return;
     }
 
@@ -557,6 +689,7 @@ document.addEventListener('DOMContentLoaded', function () {
         const requireSectionFirst = (mode === 'section');
         const canShowTailOptions = !requireSectionFirst || (exportSection.value.trim() !== '');
         sortByGroup.style.display = canShowTailOptions ? '' : 'none';
+        sortDirGroup.style.display = canShowTailOptions ? '' : 'none';
         nameFormatGroup.style.display = canShowTailOptions ? '' : 'none';
     };
 
@@ -567,7 +700,7 @@ document.addEventListener('DOMContentLoaded', function () {
 </script>
 
 <?php require '../includes/footer.php'; /*
- * © 2026 TambyTech.
+ * ï¿½ 2026 TambyTech.
  * This source code is proprietary and confidential.
  * Any unauthorized use, copying, modification, distribution, or disclosure is strictly prohibited.
  * All rights reserved.

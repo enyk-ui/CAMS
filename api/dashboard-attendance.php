@@ -30,13 +30,7 @@ if ($sectionId < 0) {
     $sectionId = 0;
 }
 
-$today = date('Y-m-d');
-$year = isset($_GET['year']) ? (int)$_GET['year'] : (int)date('Y');
-$month = isset($_GET['month']) ? (int)$_GET['month'] : (int)date('n');
-$semester = isset($_GET['semester']) ? (int)$_GET['semester'] : (((int)date('n') <= 6) ? 1 : 2);
-$selectedDate = isset($_GET['date']) && preg_match('/^\d{4}-\d{2}-\d{2}$/', (string)$_GET['date'])
-    ? (string)$_GET['date']
-    : $today;
+$systemToday = date('Y-m-d');
 
 $studentColumns = [];
 $studentColRes = $mysqli->query('SHOW COLUMNS FROM students');
@@ -61,6 +55,73 @@ $hasAttendanceCreatedAt = in_array('created_at', $attendanceColumns, true);
 
 $dateExpr = $hasAttendanceDate ? 'a.attendance_date' : ($hasAttendanceCreatedAt ? 'DATE(a.created_at)' : 'CURDATE()');
 $dailyHourExpr = $hasAttendanceCreatedAt ? 'HOUR(a.created_at)' : '0';
+
+$defaultAnchorDate = $systemToday;
+$activeSchoolYearStart = '';
+$activeSchoolYearEnd = '';
+
+$activeSyRes = $mysqli->query('SELECT start_date, end_date FROM school_years WHERE is_active = 1 ORDER BY id DESC LIMIT 1');
+if ($activeSyRes) {
+    $activeSyRow = $activeSyRes->fetch_assoc();
+    $candidateStart = trim((string)($activeSyRow['start_date'] ?? ''));
+    $candidateEnd = trim((string)($activeSyRow['end_date'] ?? ''));
+    if (preg_match('/^\d{4}-\d{2}-\d{2}$/', $candidateStart) && preg_match('/^\d{4}-\d{2}-\d{2}$/', $candidateEnd)) {
+        $activeSchoolYearStart = $candidateStart;
+        $activeSchoolYearEnd = $candidateEnd;
+        if ($activeSchoolYearStart > $activeSchoolYearEnd) {
+            [$activeSchoolYearStart, $activeSchoolYearEnd] = [$activeSchoolYearEnd, $activeSchoolYearStart];
+        }
+    }
+}
+
+$latestAttendanceDate = '';
+if ($hasAttendanceDate) {
+    $latestDateRes = $mysqli->query('SELECT MAX(attendance_date) AS latest_date FROM attendance');
+    if ($latestDateRes) {
+        $latestDateRow = $latestDateRes->fetch_assoc();
+        $candidateLatestDate = trim((string)($latestDateRow['latest_date'] ?? ''));
+        if (preg_match('/^\d{4}-\d{2}-\d{2}$/', $candidateLatestDate)) {
+            $latestAttendanceDate = $candidateLatestDate;
+        }
+    }
+} elseif ($hasAttendanceCreatedAt) {
+    $latestDateRes = $mysqli->query('SELECT MAX(DATE(created_at)) AS latest_date FROM attendance');
+    if ($latestDateRes) {
+        $latestDateRow = $latestDateRes->fetch_assoc();
+        $candidateLatestDate = trim((string)($latestDateRow['latest_date'] ?? ''));
+        if (preg_match('/^\d{4}-\d{2}-\d{2}$/', $candidateLatestDate)) {
+            $latestAttendanceDate = $candidateLatestDate;
+        }
+    }
+}
+
+if ($latestAttendanceDate !== '') {
+    $defaultAnchorDate = $latestAttendanceDate;
+}
+
+if ($activeSchoolYearStart !== '' && $activeSchoolYearEnd !== '') {
+    if ($defaultAnchorDate < $activeSchoolYearStart) {
+        $defaultAnchorDate = $activeSchoolYearStart;
+    }
+    if ($defaultAnchorDate > $activeSchoolYearEnd) {
+        if ($systemToday >= $activeSchoolYearStart && $systemToday <= $activeSchoolYearEnd) {
+            $defaultAnchorDate = $systemToday;
+        } else {
+            $defaultAnchorDate = $activeSchoolYearEnd;
+        }
+    }
+}
+
+$defaultYear = (int)substr($defaultAnchorDate, 0, 4);
+$defaultMonth = (int)substr($defaultAnchorDate, 5, 2);
+$defaultSemester = ($defaultMonth <= 6) ? 1 : 2;
+
+$year = isset($_GET['year']) ? (int)$_GET['year'] : $defaultYear;
+$month = isset($_GET['month']) ? (int)$_GET['month'] : $defaultMonth;
+$semester = isset($_GET['semester']) ? (int)$_GET['semester'] : $defaultSemester;
+$selectedDate = isset($_GET['date']) && preg_match('/^\d{4}-\d{2}-\d{2}$/', (string)$_GET['date'])
+    ? (string)$_GET['date']
+    : $defaultAnchorDate;
 
 $scopeSectionIds = [];
 $scopeSectionName = '';
@@ -169,7 +230,7 @@ if ($type === 'daily') {
 } elseif ($type === 'weekly') {
     $baseTs = strtotime($selectedDate);
     if ($baseTs === false) {
-        $baseTs = strtotime($today);
+        $baseTs = strtotime($defaultAnchorDate);
     }
     $dayOfWeek = (int)date('N', $baseTs);
     $mondayTs = strtotime('-' . ($dayOfWeek - 1) . ' days', $baseTs);
@@ -225,10 +286,10 @@ if ($type === 'daily') {
     $queryParams[] = $monthEnd;
 } else {
     if ($year < 2000 || $year > 2100) {
-        $year = (int)date('Y');
+        $year = $defaultYear;
     }
     if ($semester !== 1 && $semester !== 2) {
-        $semester = ((int)date('n') <= 6) ? 1 : 2;
+        $semester = $defaultSemester;
     }
 
     if ($semester === 1) {
@@ -332,7 +393,7 @@ api_response(200, [
 ]);
 
 /*
- * © 2026 TambyTech.
+ * ï¿½ 2026 TambyTech.
  * This source code is proprietary and confidential.
  * Any unauthorized use, copying, modification, distribution, or disclosure is strictly prohibited.
  * All rights reserved.

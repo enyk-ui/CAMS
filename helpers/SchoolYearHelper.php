@@ -6,6 +6,11 @@
 
 class SchoolYearHelper
 {
+    public static function isValidLabel(string $label): bool
+    {
+        return (bool) preg_match('/^\d{4}-\d{4}$/', $label);
+    }
+
     public static function ensureSettingsTable(mysqli $mysqli): bool
     {
         $sql = "
@@ -178,11 +183,23 @@ class SchoolYearHelper
 
     public static function createSchoolYear(mysqli $mysqli, string $label, string $startDate, string $endDate, bool $setActive): bool
     {
-        if (!preg_match('/^\d{4}-\d{4}$/', $label)) {
+        if (!self::isValidLabel($label)) {
             return false;
         }
 
         if ($startDate > $endDate) {
+            return false;
+        }
+
+        $dupStmt = $mysqli->prepare('SELECT id FROM school_years WHERE label = ? LIMIT 1');
+        if (!$dupStmt) {
+            return false;
+        }
+        $dupStmt->bind_param('s', $label);
+        $dupStmt->execute();
+        $exists = $dupStmt->get_result()->fetch_assoc();
+        $dupStmt->close();
+        if ($exists) {
             return false;
         }
 
@@ -207,6 +224,131 @@ class SchoolYearHelper
         return true;
     }
 
+    public static function updateSchoolYear(mysqli $mysqli, int $id, string $label, string $startDate, string $endDate, bool $setActive): bool
+    {
+        if ($id <= 0 || !self::isValidLabel($label) || $startDate === '' || $endDate === '' || $startDate > $endDate) {
+            return false;
+        }
+
+        $dupStmt = $mysqli->prepare('SELECT id FROM school_years WHERE label = ? AND id <> ? LIMIT 1');
+        if (!$dupStmt) {
+            return false;
+        }
+        $dupStmt->bind_param('si', $label, $id);
+        $dupStmt->execute();
+        $exists = $dupStmt->get_result()->fetch_assoc();
+        $dupStmt->close();
+        if ($exists) {
+            return false;
+        }
+
+        $stmt = $mysqli->prepare('UPDATE school_years SET label = ?, start_date = ?, end_date = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? LIMIT 1');
+        if (!$stmt) {
+            return false;
+        }
+        $stmt->bind_param('sssi', $label, $startDate, $endDate, $id);
+        if (!$stmt->execute()) {
+            $stmt->close();
+            return false;
+        }
+        $stmt->close();
+
+        if ($setActive) {
+            return self::setActiveSchoolYear($mysqli, $id);
+        }
+
+        $active = self::getActiveSchoolYear($mysqli);
+        if ($active && (int)($active['id'] ?? 0) === $id) {
+            self::upsertSetting($mysqli, 'school_year', $label);
+        }
+
+        return true;
+    }
+
+    public static function deleteSchoolYear(mysqli $mysqli, int $id): bool
+    {
+        if ($id <= 0) {
+            return false;
+        }
+
+        $stmt = $mysqli->prepare('SELECT id, label, is_active FROM school_years WHERE id = ? LIMIT 1');
+        if (!$stmt) {
+            return false;
+        }
+        $stmt->bind_param('i', $id);
+        $stmt->execute();
+        $row = $stmt->get_result()->fetch_assoc();
+        $stmt->close();
+        if (!$row) {
+            return false;
+        }
+
+        if ((int)($row['is_active'] ?? 0) === 1) {
+            return false;
+        }
+
+        $label = (string)($row['label'] ?? '');
+        $hasUsersSchoolYear = $mysqli->query("SHOW COLUMNS FROM users LIKE 'school_year_label'");
+        if ($hasUsersSchoolYear && $hasUsersSchoolYear->num_rows > 0) {
+            $refStmt = $mysqli->prepare('SELECT id FROM users WHERE school_year_label = ? LIMIT 1');
+            if ($refStmt) {
+                $refStmt->bind_param('s', $label);
+                $refStmt->execute();
+                $inUse = $refStmt->get_result()->fetch_assoc();
+                $refStmt->close();
+                if ($inUse) {
+                    return false;
+                }
+            }
+        }
+
+        $deleteStmt = $mysqli->prepare('DELETE FROM school_years WHERE id = ? LIMIT 1');
+        if (!$deleteStmt) {
+            return false;
+        }
+        $deleteStmt->bind_param('i', $id);
+        $ok = $deleteStmt->execute();
+        $deleteStmt->close();
+
+        return $ok;
+    }
+
+    public static function resolveSelectedSchoolYearLabel(mysqli $mysqli, string $sessionKey = 'selected_school_year_label'): string
+    {
+        if (session_status() === PHP_SESSION_NONE) {
+            session_start();
+        }
+
+        $selected = trim((string)($_SESSION[$sessionKey] ?? ''));
+        if ($selected !== '') {
+            $stmt = $mysqli->prepare('SELECT id FROM school_years WHERE label = ? LIMIT 1');
+            if ($stmt) {
+                $stmt->bind_param('s', $selected);
+                $stmt->execute();
+                $exists = $stmt->get_result()->fetch_assoc();
+                $stmt->close();
+                if ($exists) {
+                    return $selected;
+                }
+            }
+        }
+
+        $active = self::getActiveSchoolYear($mysqli);
+        $label = trim((string)($active['label'] ?? self::getDefaultLabel()));
+        $_SESSION[$sessionKey] = $label;
+
+        return $label;
+    }
+
+    public static function setSelectedSchoolYearLabel(string $label, string $sessionKey = 'selected_school_year_label'): void
+    {
+        if (session_status() === PHP_SESSION_NONE) {
+            session_start();
+        }
+
+        $_SESSION[$sessionKey] = trim($label);
+    }
+
     public static function getEffectiveSchoolYearRange(mysqli $mysqli): array
     {
         $active = self::getActiveSchoolYear($mysqli);
@@ -228,7 +370,7 @@ class SchoolYearHelper
 }
 
 /*
- * © 2026 TambyTech.
+ * ï¿½ 2026 TambyTech.
  * This source code is proprietary and confidential.
  * Any unauthorized use, copying, modification, distribution, or disclosure is strictly prohibited.
  * All rights reserved.

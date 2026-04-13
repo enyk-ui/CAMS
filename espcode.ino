@@ -11,6 +11,12 @@
 #define WIFI_SSID "Fingerprintscans"
 #define WIFI_PASSWORD "fingerpassword"
 
+// Set to 1 to use fixed ESP IP instead of DHCP.
+#define WIFI_USE_STATIC_IP 1
+
+// Leave empty to use automatic subnet discovery, or set to your server IP (e.g., "10.236.102.6")
+#define SERVER_IP_OVERRIDE "10.10.10.1"
+
 #define DISCOVERY_RETRY_INTERVAL 10000
 
 #define DISCOVERY_SCAN_CONNECT_TIMEOUT_MS 80
@@ -52,6 +58,11 @@ const uint16_t SERVER_PORT = 80;
 const int DEVICE_ID = 1;
 const char* DEVICE_KEY = "CAMS_ESP8266";
 const char* API_BASE_PATH = "/CAMS/api";
+const IPAddress WIFI_STATIC_IP(10, 10, 10, 2);
+const IPAddress WIFI_STATIC_GATEWAY(10, 10, 10, 1);
+const IPAddress WIFI_STATIC_SUBNET(255, 255, 255, 0);
+const IPAddress WIFI_STATIC_DNS1(8, 8, 8, 8);
+const IPAddress WIFI_STATIC_DNS2(1, 1, 1, 1);
 
 SoftwareSerial fingerSerial(SENSOR_RX_PIN, SENSOR_TX_PIN);
 Adafruit_Fingerprint finger(&fingerSerial);
@@ -72,7 +83,7 @@ unsigned long lastSystemSummaryMs = 0;
 unsigned long lastDiscoveryAttemptMs = 0;
 unsigned long lastEnrollCompleteMs = 0;
 unsigned long lastAttendanceCompleteMs = 0;
-uint8_t subnetScanNextHost = 1;
+uint32_t subnetScanNextIp = 0;
 String lcdLine1 = "";
 String lcdLine2 = "";
 bool wifiWasConnected = false;
@@ -82,12 +93,25 @@ bool bootReady = false;
 String currentMode = "IDLE";
 String lastEnrollFailureReason = "";
 String serverHost = "";
+uint8_t fallbackAttempts = 0;
+const uint8_t MAX_FALLBACK_ATTEMPTS = 5;
 
 bool probeServerCandidate(const IPAddress& candidateIp) {
   WiFiClient probeClient;
   probeClient.setTimeout(DISCOVERY_SCAN_CONNECT_TIMEOUT_MS);
 
+  // ESP8266 core exposes 2-argument connect(IPAddress, port).
+#if defined(ESP8266)
   if (!probeClient.connect(candidateIp, SERVER_PORT)) {
+    return false;
+  }
+#else
+  if (!probeClient.connect(candidateIp, SERVER_PORT, DISCOVERY_SCAN_CONNECT_TIMEOUT_MS)) {
+    return false;
+  }
+#endif
+
+  if (!probeClient.connected()) {
     return false;
   }
 
@@ -127,22 +151,72 @@ bool probeServerCandidate(const IPAddress& candidateIp) {
   return response.indexOf("\"success\":true") >= 0;
 }
 
+uint32_t ipToUint32(const IPAddress& ip) {
+  return ((uint32_t)ip[0] << 24) |
+         ((uint32_t)ip[1] << 16) |
+         ((uint32_t)ip[2] << 8) |
+         (uint32_t)ip[3];
+}
+
+IPAddress uint32ToIp(uint32_t value) {
+  return IPAddress(
+    (uint8_t)((value >> 24) & 0xFF),
+    (uint8_t)((value >> 16) & 0xFF),
+    (uint8_t)((value >> 8) & 0xFF),
+    (uint8_t)(value & 0xFF)
+  );
+}
+
 bool discoverServerBySubnetScan() {
   if (WiFi.status() != WL_CONNECTED) {
     return false;
   }
 
   IPAddress localIp = WiFi.localIP();
+  IPAddress gatewayIp = WiFi.gatewayIP();
   IPAddress subnetMask = WiFi.subnetMask();
-  if (!(subnetMask[0] == 255 && subnetMask[1] == 255 && subnetMask[2] == 255)) {
-    logInfo("DISCOVERY", "Subnet scan skipped (non-/24 network)");
+  uint32_t localIpInt = ipToUint32(localIp);
+  uint32_t gatewayIpInt = ipToUint32(gatewayIp);
+  uint32_t subnetMaskInt = ipToUint32(subnetMask);
+  uint32_t networkIpInt = localIpInt & subnetMaskInt;
+  uint32_t broadcastIpInt = networkIpInt | (~subnetMaskInt);
+
+  if (broadcastIpInt <= (networkIpInt + 1)) {
+    logInfo("DISCOVERY", "Subnet scan skipped (invalid host range)");
     return false;
   }
 
+  uint32_t firstHostInt = networkIpInt + 1;
+  uint32_t lastHostInt = broadcastIpInt - 1;
+  uint32_t hostCount = (lastHostInt - firstHostInt) + 1;
+
+  // Avoid full scans on large networks; keep discovery bounded and responsive.
+  if (hostCount > 1024) {
+    firstHostInt = (localIpInt & 0xFFFFFF00) + 1;
+    lastHostInt = (localIpInt & 0xFFFFFF00) + 254;
+    hostCount = (lastHostInt - firstHostInt) + 1;
+    logInfo("DISCOVERY", "Large subnet detected, limiting scan to local /24 window");
+  }
+
+  if (subnetScanNextIp < firstHostInt || subnetScanNextIp > lastHostInt) {
+    subnetScanNextIp = firstHostInt;
+  }
+
+  unsigned long scanStartMs = millis();
   displayLCD("Finding server", "Subnet scan");
   logInfo("DISCOVERY", "Trying subnet scan fallback...");
 
   bool tried[255] = {false};
+
+  if (gatewayIpInt >= firstHostInt && gatewayIpInt <= lastHostInt && gatewayIpInt != localIpInt) {
+    if (probeServerCandidate(gatewayIp)) {
+      serverHost = gatewayIp.toString();
+      subnetScanNextIp = 0;
+      logInfo("DISCOVERY", "Server found by gateway probe at " + serverHost);
+      displayLCD("Server found", serverHost);
+      return true;
+    }
+  }
 
   // Prioritize common CAMS host ranges first to reduce first-match latency.
   int localHost = (int)localIp[3];
@@ -161,10 +235,15 @@ bool discoverServerBySubnetScan() {
     }
 
     tried[host] = true;
-    IPAddress candidate(localIp[0], localIp[1], localIp[2], host);
+    uint32_t candidateInt = (localIpInt & 0xFFFFFF00) | (uint32_t)host;
+    if (candidateInt < firstHostInt || candidateInt > lastHostInt || candidateInt == localIpInt) {
+      continue;
+    }
+
+    IPAddress candidate = uint32ToIp(candidateInt);
     if (probeServerCandidate(candidate)) {
       serverHost = candidate.toString();
-      subnetScanNextHost = 1;
+      subnetScanNextIp = 0;
       logInfo("DISCOVERY", "Server found by scan at " + serverHost);
       displayLCD("Server found", serverHost);
       return true;
@@ -173,19 +252,24 @@ bool discoverServerBySubnetScan() {
   }
 
   for (uint8_t scanned = 0; scanned < DISCOVERY_SCAN_HOSTS_PER_ATTEMPT; scanned++) {
-    if (subnetScanNextHost > 254) {
-      subnetScanNextHost = 1;
+    if (subnetScanNextIp > lastHostInt) {
+      subnetScanNextIp = firstHostInt;
     }
 
-    uint8_t host = subnetScanNextHost++;
-    if (tried[host]) {
+    uint32_t candidateInt = subnetScanNextIp++;
+    if (candidateInt == localIpInt) {
       continue;
     }
 
-    IPAddress candidate(localIp[0], localIp[1], localIp[2], host);
+    uint8_t host = (uint8_t)(candidateInt & 0xFF);
+    if ((candidateInt & 0xFFFFFF00) == (localIpInt & 0xFFFFFF00) && tried[host]) {
+      continue;
+    }
+
+    IPAddress candidate = uint32ToIp(candidateInt);
     if (probeServerCandidate(candidate)) {
       serverHost = candidate.toString();
-      subnetScanNextHost = 1;
+      subnetScanNextIp = 0;
       logInfo("DISCOVERY", "Server found by scan at " + serverHost);
       displayLCD("Server found", serverHost);
       return true;
@@ -193,7 +277,7 @@ bool discoverServerBySubnetScan() {
     yield();
   }
 
-  logInfo("DISCOVERY", "Subnet scan chunk finished, no match yet");
+  logInfo("DISCOVERY", "Subnet scan chunk finished in " + String(millis() - scanStartMs) + " ms, no match yet");
   return false;
 }
 
@@ -202,13 +286,34 @@ bool discoverServerHost() {
     return false;
   }
 
+  // If server IP is configured, use it directly (primary method)
+  if (String(SERVER_IP_OVERRIDE).length() > 0) {
+    serverHost = String(SERVER_IP_OVERRIDE);
+    logInfo("DISCOVERY", "Using configured static server IP: " + serverHost);
+    fallbackAttempts = 0; // Reset fallback counter on successful static IP use
+    return true;
+  }
+
   unsigned long now = millis();
   if (now - lastDiscoveryAttemptMs < DISCOVERY_RETRY_INTERVAL) {
     return serverHost.length() > 0;
   }
   lastDiscoveryAttemptMs = now;
 
-  return discoverServerBySubnetScan();
+  // Fallback to subnet scan with retry limit
+  if (fallbackAttempts >= MAX_FALLBACK_ATTEMPTS) {
+    logInfo("DISCOVERY", "Fallback attempts exhausted (" + String(fallbackAttempts) + "/" + String(MAX_FALLBACK_ATTEMPTS) + "), resetting...");
+    fallbackAttempts = 0; // Reset counter to try again
+  }
+
+  if (discoverServerBySubnetScan()) {
+    fallbackAttempts = 0; // Reset on success
+    return true;
+  }
+
+  fallbackAttempts++;
+  logInfo("DISCOVERY", "Fallback attempt " + String(fallbackAttempts) + "/" + String(MAX_FALLBACK_ATTEMPTS));
+  return false;
 }
 
 const uint8_t FEEDBACK_IDLE = 0;
@@ -555,6 +660,7 @@ bool connectWiFi() {
     wifiWasConnected = false;
     serverReady = false;
     serverHost = "";
+    fallbackAttempts = 0; // Reset discovery attempts on WiFi disconnect
     logInfo("WIFI", "Disconnected");
   }
 
@@ -573,6 +679,11 @@ bool connectWiFi() {
   displayLCD("WiFi connecting");
 
   WiFi.mode(WIFI_STA);
+#if WIFI_USE_STATIC_IP
+  if (!WiFi.config(WIFI_STATIC_IP, WIFI_STATIC_GATEWAY, WIFI_STATIC_SUBNET, WIFI_STATIC_DNS1, WIFI_STATIC_DNS2)) {
+    logInfo("WIFI", "Static IP config failed, continuing...");
+  }
+#endif
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
 
   unsigned long start = millis();
@@ -1388,22 +1499,60 @@ void setup() {
   Serial.println("[SYSTEM] -------------------------------");
   Serial.print("[CONFIG] Device ID=");
   Serial.println(DEVICE_ID);
+  Serial.print("[CONFIG] I2C SDA=");
+  Serial.print("D3");
+  Serial.print(" SCL=");
+  Serial.println("D4");
+  Serial.print("[CONFIG] LCD Address=0x");
+  Serial.println("27");
   Serial.print("[CONFIG] Server=");
-  Serial.println("AUTO (local subnet scan)");
+  if (String(SERVER_IP_OVERRIDE).length() > 0) {
+    Serial.println(String(SERVER_IP_OVERRIDE) + " (static)");
+  } else {
+    Serial.println("AUTO (local subnet scan)");
+  }
   Serial.print("[CONFIG] Server Port=");
   Serial.println(SERVER_PORT);
   Serial.print("[CONFIG] API Path=");
   Serial.println(API_BASE_PATH);
   Serial.print("[CONFIG] WiFi SSID=");
   Serial.println(WIFI_SSID);
+  Serial.print("[CONFIG] WiFi IP mode=");
+#if WIFI_USE_STATIC_IP
+  Serial.println("STATIC");
+  Serial.print("[CONFIG] WiFi Static IP=");
+  Serial.println(WIFI_STATIC_IP);
+  Serial.print("[CONFIG] WiFi Gateway=");
+  Serial.println(WIFI_STATIC_GATEWAY);
+  Serial.print("[CONFIG] WiFi Subnet=");
+  Serial.println(WIFI_STATIC_SUBNET);
+#else
+  Serial.println("DHCP");
+#endif
 
   Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
-  lcd.init();
-  lcd.backlight();
+  delay(500); // Give LCD time to power up
+  
+  // Initialize LCD with retry logic
+  bool lcdInitialized = false;
+  for (int attempt = 0; attempt < 3; attempt++) {
+    lcd.init();
+    delay(200);
+    lcd.backlight();
+    delay(200);
+    lcdInitialized = true;
+    break;
+  }
+  
+  if (lcdInitialized) {
+    displayLCD("Booting...", "Step1: WiFi");
+    Serial.println("[LCD] Initialized successfully");
+  } else {
+    Serial.println("[LCD] FAILED to initialize");
+  }
+  
   initFeedbackHardware();
-  displayLCD("Booting...", "Step1: WiFi");
 
-  // Force immediate first attempts in loop() boot sequence.
   lastWifiAttempt = 0;
   lastServerCheckMs = 0;
   lastSensorInitAttemptMs = 0;

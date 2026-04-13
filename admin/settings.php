@@ -374,6 +374,35 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $message_type = 'danger';
             }
         }
+    } elseif ($action === 'edit_school_year') {
+        $schoolYearId = (int)($_POST['school_year_id'] ?? 0);
+        $label = trim((string)($_POST['school_year_label'] ?? ''));
+        $startDate = trim((string)($_POST['school_year_start'] ?? ''));
+        $endDate = trim((string)($_POST['school_year_end'] ?? ''));
+        $setActive = isset($_POST['school_year_make_active']);
+
+        if (!SchoolYearHelper::isValidLabel($label)) {
+            $message = 'School year label must follow YYYY-YYYY format.';
+            $message_type = 'danger';
+        } elseif ($startDate === '' || $endDate === '' || $startDate > $endDate) {
+            $message = 'Please provide a valid school year date range.';
+            $message_type = 'danger';
+        } elseif (SchoolYearHelper::updateSchoolYear($mysqli, $schoolYearId, $label, $startDate, $endDate, $setActive)) {
+            $message = 'School year updated successfully.';
+            $message_type = 'success';
+        } else {
+            $message = 'Unable to update school year. Duplicate label or invalid request.';
+            $message_type = 'danger';
+        }
+    } elseif ($action === 'delete_school_year') {
+        $schoolYearId = (int)($_POST['school_year_id'] ?? 0);
+        if (SchoolYearHelper::deleteSchoolYear($mysqli, $schoolYearId)) {
+            $message = 'School year deleted successfully.';
+            $message_type = 'success';
+        } else {
+            $message = 'Unable to delete school year. Active or referenced records may still exist.';
+            $message_type = 'danger';
+        }
     } elseif ($action === 'update_admin_account') {
         $adminId = (int) ($_SESSION['admin_id'] ?? 0);
         $username = trim($_POST['admin_username'] ?? '');
@@ -769,6 +798,24 @@ if (ensureUsersAdminSchema($mysqli)) {
                                                     <input type="hidden" name="school_year_id" value="<?php echo (int) $sy['id']; ?>">
                                                     <button type="submit" class="btn btn-sm btn-outline-primary">Set Active</button>
                                                 </form>
+                                            <?php endif; ?>
+                                            <button
+                                                type="button"
+                                                class="btn btn-sm btn-outline-secondary edit-school-year-btn"
+                                                data-bs-toggle="modal"
+                                                data-bs-target="#editSchoolYearModal"
+                                                data-school-year-id="<?php echo (int)$sy['id']; ?>"
+                                                data-school-year-label="<?php echo htmlspecialchars((string)$sy['label']); ?>"
+                                                data-school-year-start="<?php echo htmlspecialchars((string)$sy['start_date']); ?>"
+                                                data-school-year-end="<?php echo htmlspecialchars((string)$sy['end_date']); ?>"
+                                                data-school-year-active="<?php echo (int)$sy['is_active']; ?>"
+                                            >Edit</button>
+                                            <?php if ((int) $sy['is_active'] !== 1): ?>
+                                                <form method="POST" class="d-inline" onsubmit="return confirm('Delete this school year?');">
+                                                    <input type="hidden" name="action" value="delete_school_year">
+                                                    <input type="hidden" name="school_year_id" value="<?php echo (int) $sy['id']; ?>">
+                                                    <button type="submit" class="btn btn-sm btn-outline-danger">Delete</button>
+                                                </form>
                                             <?php else: ?>
                                                 <span class="text-success small">Default</span>
                                             <?php endif; ?>
@@ -809,6 +856,43 @@ if (ensureUsersAdminSchema($mysqli)) {
                     </div>
                 </form>
             </div>
+        </div>
+    </div>
+</div>
+
+<div class="modal fade" id="editSchoolYearModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title"><i class="bi bi-pencil-square"></i> Edit School Year</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <form method="POST">
+                <div class="modal-body">
+                    <input type="hidden" name="action" value="edit_school_year">
+                    <input type="hidden" id="edit_school_year_id" name="school_year_id" value="0">
+                    <div class="mb-3">
+                        <label for="edit_school_year_label" class="form-label">School Year Label</label>
+                        <input type="text" id="edit_school_year_label" name="school_year_label" class="form-control" required pattern="\d{4}-\d{4}">
+                    </div>
+                    <div class="mb-3">
+                        <label for="edit_school_year_start" class="form-label">Start Date</label>
+                        <input type="date" id="edit_school_year_start" name="school_year_start" class="form-control" required>
+                    </div>
+                    <div class="mb-3">
+                        <label for="edit_school_year_end" class="form-label">End Date</label>
+                        <input type="date" id="edit_school_year_end" name="school_year_end" class="form-control" required>
+                    </div>
+                    <div class="form-check">
+                        <input type="checkbox" id="edit_school_year_make_active" name="school_year_make_active" class="form-check-input">
+                        <label for="edit_school_year_make_active" class="form-check-label">Set as active/current</label>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                    <button type="submit" class="btn btn-primary">Save Changes</button>
+                </div>
+            </form>
         </div>
     </div>
 </div>
@@ -910,6 +994,11 @@ document.addEventListener('DOMContentLoaded', function () {
     const editStartInput = document.getElementById('edit_start_time');
     const editEndInput = document.getElementById('edit_end_time');
     const editLateInput = document.getElementById('edit_late_threshold_minutes');
+    const editSchoolYearId = document.getElementById('edit_school_year_id');
+    const editSchoolYearLabel = document.getElementById('edit_school_year_label');
+    const editSchoolYearStart = document.getElementById('edit_school_year_start');
+    const editSchoolYearEnd = document.getElementById('edit_school_year_end');
+    const editSchoolYearActive = document.getElementById('edit_school_year_make_active');
 
     document.querySelectorAll('.edit-schedule-btn').forEach((button) => {
         button.addEventListener('click', function () {
@@ -921,11 +1010,21 @@ document.addEventListener('DOMContentLoaded', function () {
             if (editLateInput) editLateInput.value = this.dataset.lateThreshold || '15';
         });
     });
+
+    document.querySelectorAll('.edit-school-year-btn').forEach((button) => {
+        button.addEventListener('click', function () {
+            if (editSchoolYearId) editSchoolYearId.value = this.dataset.schoolYearId || '0';
+            if (editSchoolYearLabel) editSchoolYearLabel.value = this.dataset.schoolYearLabel || '';
+            if (editSchoolYearStart) editSchoolYearStart.value = this.dataset.schoolYearStart || '';
+            if (editSchoolYearEnd) editSchoolYearEnd.value = this.dataset.schoolYearEnd || '';
+            if (editSchoolYearActive) editSchoolYearActive.checked = (this.dataset.schoolYearActive || '0') === '1';
+        });
+    });
 });
 </script>
 
 <?php require '../includes/footer.php'; /*
- * © 2026 TambyTech.
+ * ï¿½ 2026 TambyTech.
  * This source code is proprietary and confidential.
  * Any unauthorized use, copying, modification, distribution, or disclosure is strictly prohibited.
  * All rights reserved.
