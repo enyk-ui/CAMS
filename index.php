@@ -19,56 +19,46 @@ if (isset($_SESSION['admin_id']) && isset($_SESSION['role'])) {
 require_once 'config/db.php';
 
 $error = '';
+$indexLogoRelativePath = 'asset/logo/logo.png';
+$indexLogoAbsolutePath = __DIR__ . '/asset/logo/logo.png';
+$indexHasLogo = is_file($indexLogoAbsolutePath);
 
 // Handle login form submission
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    $email = trim($_POST['email'] ?? '');
+    $loginIdentifier = trim($_POST['login'] ?? '');
     $password = $_POST['password'] ?? '';
 
     // Validation
-    if (empty($email) || empty($password)) {
-        $error = 'Email and password are required';
+    if (empty($loginIdentifier) || empty($password)) {
+        $error = 'Username/email and password are required';
     } else {
-        // Check admin table
-        $admin_email = $mysqli->real_escape_string($email);
-        $admin_result = $mysqli->query("SELECT id, email, password, full_name FROM admins WHERE email = '$admin_email' AND status = 'active'");
+        // Check users table (supports both admin and teacher roles)
+        $stmt = $mysqli->prepare("SELECT id, username, password, full_name, email, role FROM users WHERE (username = ? OR email = ?) AND status = 'active'");
+        $stmt->bind_param('ss', $loginIdentifier, $loginIdentifier);
+        $stmt->execute();
+        $result = $stmt->get_result();
 
-        if ($admin_result && $admin_result->num_rows > 0) {
-            $admin = $admin_result->fetch_assoc();
+        if ($result && $result->num_rows > 0) {
+            $user = $result->fetch_assoc();
             // Verify password
-            if (password_verify($password, $admin['password'])) {
-                $_SESSION['admin_id'] = $admin['id'];
-                $_SESSION['admin_email'] = $admin['email'];
-                $_SESSION['admin_name'] = $admin['full_name'];
-                $_SESSION['role'] = 'admin';
+            if (password_verify($password, $user['password'])) {
+                $_SESSION['admin_id'] = $user['id'];
+                $_SESSION['admin_email'] = $user['email'] ?? $user['username'];
+                $_SESSION['admin_name'] = $user['full_name'];
+                $_SESSION['role'] = $user['role'];
                 $_SESSION['login_time'] = time();
-                header('Location: admin/dashboard.php');
+                
+                if ($user['role'] === 'admin') {
+                    header('Location: admin/dashboard.php');
+                } else {
+                    header('Location: teacher/dashboard.php');
+                }
                 exit;
             } else {
-                $error = 'Invalid email or password';
+                $error = 'Invalid username or password';
             }
         } else {
-            // Check teacher table
-            $teacher_result = $mysqli->query("SELECT id, email, password, full_name, section FROM teachers WHERE email = '$admin_email' AND status = 'active'");
-
-            if ($teacher_result && $teacher_result->num_rows > 0) {
-                $teacher = $teacher_result->fetch_assoc();
-                // Verify password
-                if (password_verify($password, $teacher['password'])) {
-                    $_SESSION['admin_id'] = $teacher['id'];
-                    $_SESSION['admin_email'] = $teacher['email'];
-                    $_SESSION['admin_name'] = $teacher['full_name'];
-                    $_SESSION['role'] = 'teacher';
-                    $_SESSION['teacher_section'] = $teacher['section'];
-                    $_SESSION['login_time'] = time();
-                    header('Location: teacher/dashboard.php');
-                    exit;
-                } else {
-                    $error = 'Invalid email or password';
-                }
-            } else {
-                $error = 'Invalid email or password';
-            }
+            $error = 'Invalid username or password';
         }
     }
 }
@@ -81,6 +71,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     <title>CAMS - Criminology Attendance Monitoring System</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
     <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.7.2/font/bootstrap-icons.css" rel="stylesheet">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Montserrat:wght@500;600;700;800&display=swap" rel="stylesheet">
     <style>
         * {
             margin: 0;
@@ -89,13 +83,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
 
         body {
-            background: linear-gradient(135deg, #f9fafb 0%, #f3f4f6 100%);
+            background:
+                radial-gradient(circle at top left, rgba(239, 68, 68, 0.22), transparent 28%),
+                radial-gradient(circle at bottom right, rgba(248, 113, 113, 0.18), transparent 24%),
+                linear-gradient(135deg, #0b0b0d 0%, #151518 45%, #f8f8f8 100%);
             min-height: 100vh;
             display: flex;
             align-items: center;
             justify-content: center;
             padding: 20px;
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            font-family: 'Montserrat', sans-serif;
+            color: #111111;
         }
 
         .container-wrapper {
@@ -110,9 +108,24 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             align-items: center;
         }
 
+        .hero-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            padding: 10px 14px;
+            border-radius: 999px;
+            background: rgba(255, 255, 255, 0.08);
+            border: 1px solid rgba(255, 255, 255, 0.14);
+            color: #f8f8f8;
+            font-size: 0.82rem;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+            margin-bottom: 24px;
+        }
+
         /* Information Section */
         .info-section {
-            color: #111827;
+            color: #f8f8f8;
         }
 
         .logo-header {
@@ -123,29 +136,39 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
 
         .logo-icon {
-            width: 60px;
-            height: 60px;
-            background: linear-gradient(135deg, #2563eb 0%, #1e40af 100%);
+            width: 74px;
+            height: 74px;
+            background: linear-gradient(135deg, #ef4444 0%, #7f1d1d 100%);
             border-radius: 15px;
             display: flex;
             align-items: center;
             justify-content: center;
             margin-right: 15px;
-            font-size: 2rem;
+            font-size: 2.2rem;
             color: white;
+        }
+
+        .logo-icon img {
+            width: 68px;
+            height: 68px;
+            object-fit: contain;
+            border-radius: 10px;
+            background: transparent;
+            padding: 0;
         }
 
         .logo-text h1 {
             font-size: 2rem;
-            font-weight: 700;
+            font-weight: 800;
             margin: 0;
-            color: #111827;
+            color: #ffffff;
+            letter-spacing: 0.02em;
         }
 
         .logo-text p {
             font-size: 0.95rem;
             margin: 5px 0 0 0;
-            color: #6b7280;
+            color: rgba(255, 255, 255, 0.75);
         }
 
         .system-description {
@@ -156,14 +179,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         .system-description h2 {
             font-size: 1.5rem;
             margin-bottom: 15px;
-            font-weight: 600;
-            color: #111827;
+            font-weight: 800;
+            color: #ffffff;
         }
 
         .system-description p {
             font-size: 1rem;
             line-height: 1.6;
-            color: #6b7280;
+            color: rgba(255, 255, 255, 0.72);
             margin-bottom: 0;
         }
 
@@ -174,8 +197,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         .features-list h3 {
             font-size: 1.1rem;
             margin-bottom: 20px;
-            font-weight: 600;
-            color: #111827;
+            font-weight: 700;
+            color: #ffffff;
         }
 
         .feature-item {
@@ -192,7 +215,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         .feature-icon {
             width: 40px;
             height: 40px;
-            background: linear-gradient(135deg, #2563eb 0%, #1e40af 100%);
+            background: linear-gradient(135deg, #ef4444 0%, #7f1d1d 100%);
             border-radius: 10px;
             display: flex;
             align-items: center;
@@ -205,11 +228,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
         .feature-text {
             font-size: 0.95rem;
-            color: #6b7280;
+            color: rgba(255, 255, 255, 0.72);
         }
 
         .feature-text strong {
-            color: #111827;
+            color: #ffffff;
         }
 
         /* Login Form Section */
@@ -218,24 +241,26 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
 
         .login-card {
-            background: white;
-            border: none;
-            border-radius: 20px;
-            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.08);
+            background: rgba(255, 255, 255, 0.96);
+            border: 1px solid rgba(255, 255, 255, 0.65);
+            border-radius: 24px;
+            box-shadow: 0 30px 70px rgba(0, 0, 0, 0.35);
             overflow: hidden;
+            backdrop-filter: blur(16px);
         }
 
         .card-header-custom {
-            background: linear-gradient(135deg, #2563eb 0%, #1e40af 100%);
+            background:
+                linear-gradient(135deg, rgba(17, 17, 17, 0.92) 0%, rgba(51, 51, 51, 0.92) 55%, rgba(239, 68, 68, 0.94) 100%);
             color: white;
-            padding: 30px 25px;
+            padding: 34px 28px;
             text-align: center;
         }
 
         .card-header-custom h3 {
             margin: 0;
-            font-size: 1.3rem;
-            font-weight: 600;
+            font-size: 1.4rem;
+            font-weight: 800;
             display: flex;
             align-items: center;
             justify-content: center;
@@ -249,7 +274,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
 
         .card-body-custom {
-            padding: 35px 25px;
+            padding: 34px 28px 30px;
         }
 
         .form-group {
@@ -257,26 +282,27 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
 
         .form-label {
-            font-weight: 600;
-            color: #111827;
+            font-weight: 700;
+            color: #111111;
             margin-bottom: 8px;
             display: block;
             font-size: 0.95rem;
         }
 
         .form-control {
-            border: 1px solid #e5e7eb;
-            border-radius: 10px;
+            border: 1px solid #d1d5db;
+            border-radius: 12px;
             padding: 12px 15px;
             font-size: 0.95rem;
             transition: all 0.3s;
-            background: #f9fafb;
+            background: #ffffff;
+            color: #111111;
         }
 
         .form-control:focus {
             background: white;
-            border-color: #2563eb;
-            box-shadow: 0 0 0 0.2rem rgba(37, 99, 235, 0.15);
+            border-color: #ef4444;
+            box-shadow: 0 0 0 0.2rem rgba(239, 68, 68, 0.16);
         }
 
         .form-control::placeholder {
@@ -284,12 +310,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
 
         .btn-login {
-            background: linear-gradient(135deg, #2563eb 0%, #1e40af 100%);
+            background: linear-gradient(135deg, #111111 0%, #ef4444 100%);
             border: none;
             color: white;
             padding: 12px 20px;
-            border-radius: 10px;
-            font-weight: 600;
+            border-radius: 12px;
+            font-weight: 800;
             font-size: 0.95rem;
             width: 100%;
             margin-top: 10px;
@@ -299,7 +325,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
         .btn-login:hover {
             transform: translateY(-2px);
-            box-shadow: 0 10px 25px rgba(37, 99, 235, 0.4);
+            box-shadow: 0 14px 28px rgba(239, 68, 68, 0.34);
             color: white;
         }
 
@@ -309,7 +335,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
         .alert-custom {
             border: none;
-            border-radius: 10px;
+            border-radius: 12px;
             margin-bottom: 20px;
             border-left: 4px solid;
             padding: 15px;
@@ -323,19 +349,19 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
 
         .demo-info {
-            background: #eff6ff;
-            border: 1px solid #bfdbfe;
-            border-radius: 10px;
+            background: linear-gradient(135deg, rgba(17, 17, 17, 0.04), rgba(239, 68, 68, 0.08));
+            border: 1px solid rgba(17, 17, 17, 0.08);
+            border-radius: 12px;
             padding: 15px;
             margin-top: 20px;
             font-size: 0.85rem;
-            color: #1e40af;
+            color: #111111;
         }
 
         .demo-info strong {
             display: block;
             margin-bottom: 8px;
-            color: #1e40af;
+            color: #ef4444;
         }
 
         .demo-info p {
@@ -414,9 +440,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         <div class="main-container">
             <!-- Left Side: System Information -->
             <div class="info-section">
+                <div class="hero-badge">
+                    <i class="bi bi-shield-lock"></i>
+                    Secure access for admins and teachers
+                </div>
+
                 <div class="logo-header">
                     <div class="logo-icon">
-                        <i class="bi bi-fingerprint"></i>
+                        <?php if ($indexHasLogo): ?>
+                            <img src="<?php echo htmlspecialchars($indexLogoRelativePath); ?>" alt="CAMS Logo">
+                        <?php else: ?>
+                            <i class="fa-solid fa-fingerprint"></i>
+                        <?php endif; ?>
                     </div>
                     <div class="logo-text">
                         <h1>CAMS</h1>
@@ -427,8 +462,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 <div class="system-description">
                     <h2>Criminology Attendance Monitoring System</h2>
                     <p>
-                        A cutting-edge fingerprint-based attendance solution designed for criminology programs.
-                        Combines biometric security with modern web technology for accurate, real-time attendance tracking.
+                        A fingerprint-based attendance platform built for criminology programs.
+                        It pairs biometric tracking with a sharp red, black, and white interface for fast daily access.
                     </p>
                 </div>
 
@@ -514,19 +549,21 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
                         <form method="POST">
                             <div class="form-group">
-                                <label for="email" class="form-label">
-                                    <i class="bi bi-envelope"></i> Email Address
+                                <label for="login" class="form-label">
+                                    <i class="bi bi-person-badge"></i> Username or Email
                                 </label>
                                 <input
-                                    type="email"
+                                    type="text"
                                     class="form-control"
-                                    id="email"
-                                    name="email"
-                                    placeholder="Enter your email"
+                                    id="login"
+                                    name="login"
+                                    placeholder="Enter your username or email"
                                     required
                                     autofocus
-                                    value="<?php echo htmlspecialchars($_POST['email'] ?? ''); ?>"
+                                    autocomplete="username"
+                                    value="<?php echo htmlspecialchars($_POST['login'] ?? ''); ?>"
                                 >
+                                <small class="text-muted d-block mt-2">Use either your username or your registered email address.</small>
                             </div>
 
                             <div class="form-group">
@@ -562,3 +599,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
 </body>
 </html>
+
+<?php
+/*
+ * � 2026 TambyTech.
+ * This source code is proprietary and confidential.
+ * Any unauthorized use, copying, modification, distribution, or disclosure is strictly prohibited.
+ * All rights reserved.
+ */
+?>

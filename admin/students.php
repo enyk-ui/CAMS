@@ -6,7 +6,184 @@
 
 session_start();
 require_once '../config/db.php';
+require_once '../helpers/SchoolYearHelper.php';
 require '../includes/header.php';
+
+SchoolYearHelper::ensureSchoolYearSupport($mysqli);
+$activeSchoolYear = SchoolYearHelper::getEffectiveSchoolYearRange($mysqli);
+$schoolYears = SchoolYearHelper::getAllSchoolYears($mysqli);
+
+function studentColumnExists(mysqli $mysqli, string $columnName): bool
+{
+    $safeColumn = $mysqli->real_escape_string($columnName);
+    $result = $mysqli->query("SHOW COLUMNS FROM students LIKE '{$safeColumn}'");
+    return $result && $result->num_rows > 0;
+}
+
+function tableColumnExists(mysqli $mysqli, string $tableName, string $columnName): bool
+{
+    $safeTable = $mysqli->real_escape_string($tableName);
+    $safeColumn = $mysqli->real_escape_string($columnName);
+    $result = $mysqli->query("SHOW COLUMNS FROM {$safeTable} LIKE '{$safeColumn}'");
+    return $result && $result->num_rows > 0;
+}
+
+function usersColumnExists(mysqli $mysqli, string $columnName): bool
+{
+    $safeColumn = $mysqli->real_escape_string($columnName);
+    $result = $mysqli->query("SHOW COLUMNS FROM users LIKE '{$safeColumn}'");
+    return $result && $result->num_rows > 0;
+}
+
+function buildTeacherAssignmentMap(mysqli $mysqli): array
+{
+    $map = [];
+    $usersTable = $mysqli->query("SHOW TABLES LIKE 'users'");
+    if (!$usersTable || $usersTable->num_rows === 0) {
+        return $map;
+    }
+
+    if (!usersColumnExists($mysqli, 'school_year_label') || !usersColumnExists($mysqli, 'year_level') || !usersColumnExists($mysqli, 'section')) {
+        return $map;
+    }
+
+    $result = $mysqli->query("SELECT school_year_label, year_level, section FROM users WHERE role = 'teacher' AND status = 'active' AND school_year_label IS NOT NULL AND school_year_label <> '' AND year_level IS NOT NULL AND section IS NOT NULL AND TRIM(section) <> ''");
+    if (!$result) {
+        return $map;
+    }
+
+    while ($row = $result->fetch_assoc()) {
+        $sy = trim((string)($row['school_year_label'] ?? ''));
+        $year = (string)((int)($row['year_level'] ?? 0));
+        $section = trim((string)($row['section'] ?? ''));
+        if ($sy === '' || $year === '0' || $section === '') {
+            continue;
+        }
+
+        if (!isset($map[$sy])) {
+            $map[$sy] = [];
+        }
+        if (!isset($map[$sy][$year])) {
+            $map[$sy][$year] = [];
+        }
+        $map[$sy][$year][$section] = true;
+    }
+
+    return $map;
+}
+
+function studentMatchesExportScope(array $student, string $scope, string $schoolYear, string $section, array $teacherAssignmentMap): bool
+{
+    if ($scope === 'all' || $scope === 'filters') {
+        return true;
+    }
+
+    $studentYear = (string)((int)($student['year'] ?? 0));
+    $studentSection = trim((string)($student['section'] ?? ''));
+
+    if ($scope === 'school_year') {
+        if ($schoolYear === '' || $studentYear === '0' || $studentSection === '') {
+            return false;
+        }
+        return !empty($teacherAssignmentMap[$schoolYear][$studentYear][$studentSection]);
+    }
+
+    if ($scope === 'section') {
+        if ($section === '' || strcasecmp($studentSection, $section) !== 0) {
+            return false;
+        }
+
+        if ($schoolYear !== '') {
+            if ($studentYear === '0') {
+                return false;
+            }
+            return !empty($teacherAssignmentMap[$schoolYear][$studentYear][$studentSection]);
+        }
+
+        return true;
+    }
+
+    return true;
+}
+
+function formatStudentName(array $student): string
+{
+    $first = trim((string) ($student['first_name'] ?? ''));
+    $middle = trim((string) ($student['middle_initial'] ?? ''));
+    $last = trim((string) ($student['last_name'] ?? ''));
+    $ext = trim((string) ($student['extension'] ?? ''));
+
+    $name = $last;
+    if ($first !== '') {
+        $name .= ($name !== '' ? ', ' : '') . $first;
+    }
+    if ($middle !== '') {
+        $name .= ' ' . strtoupper(substr($middle, 0, 1)) . '.';
+    }
+    if ($ext !== '') {
+        $name .= ' ' . $ext;
+    }
+
+    return trim($name);
+}
+
+function formatNameByMode(array $student, string $mode): string
+{
+    $first = trim((string)($student['first_name'] ?? ''));
+    $middle = trim((string)($student['middle_initial'] ?? ''));
+    $last = trim((string)($student['last_name'] ?? ''));
+    $ext = trim((string)($student['extension'] ?? ''));
+    $middleToken = $middle !== '' ? strtoupper(substr($middle, 0, 1)) . '.' : '';
+
+    if ($mode === 'full_name') {
+        $parts = array_filter([$first, $middleToken, $last, $ext], static fn($part) => $part !== '');
+        return trim(implode(' ', $parts));
+    }
+
+    $name = $last;
+    if ($first !== '') {
+        $name .= ($name !== '' ? ', ' : '') . $first;
+    }
+    if ($middleToken !== '') {
+        $name .= ' ' . $middleToken;
+    }
+    if ($ext !== '') {
+        $name .= ' ' . $ext;
+    }
+
+    return trim($name);
+}
+
+function sortStudentsForExport(array &$students, string $sortBy, string $sortDir): void
+{
+    $direction = strtolower($sortDir) === 'asc' ? 1 : -1;
+
+    usort($students, function (array $a, array $b) use ($sortBy, $direction): int {
+        switch ($sortBy) {
+            case 'name':
+                $cmp = strcasecmp(formatStudentName($a), formatStudentName($b));
+                break;
+            case 'year':
+                $cmp = ((int)($a['year'] ?? 0)) <=> ((int)($b['year'] ?? 0));
+                break;
+            case 'section':
+                $cmp = strcasecmp((string)($a['section'] ?? ''), (string)($b['section'] ?? ''));
+                break;
+            case 'fingerprints':
+                $cmp = ((int)($a['fingerprint_count'] ?? 0)) <=> ((int)($b['fingerprint_count'] ?? 0));
+                break;
+            case 'status':
+                $cmp = strcasecmp((string)($a['status'] ?? ''), (string)($b['status'] ?? ''));
+                break;
+            case 'created':
+            default:
+                $cmp = strcmp((string)($a['id'] ?? ''), (string)($b['id'] ?? ''));
+                break;
+        }
+
+        return $cmp * $direction;
+    });
+}
 
 $message = '';
 $message_type = '';
@@ -14,17 +191,213 @@ $message_type = '';
 // Handle DELETE
 if (isset($_GET['delete'])) {
     $student_id = (int)$_GET['delete'];
-    $mysqli->query("DELETE FROM students WHERE id = $student_id");
-    $message = "Student deleted successfully!";
-    $message_type = "success";
+    if ($student_id <= 0) {
+        $message = 'Invalid student id.';
+        $message_type = 'danger';
+    } else {
+        $attendanceStmt = $mysqli->prepare('SELECT id FROM attendance WHERE student_id = ? LIMIT 1');
+        $attendanceStmt->bind_param('i', $student_id);
+        $attendanceStmt->execute();
+        $hasAttendance = $attendanceStmt->get_result()->fetch_assoc();
+        $attendanceStmt->close();
+
+        if ($hasAttendance) {
+            $message = 'Delete blocked: student has attendance records.';
+            $message_type = 'danger';
+        } else {
+            $deleteStmt = $mysqli->prepare('DELETE FROM students WHERE id = ? LIMIT 1');
+            $deleteStmt->bind_param('i', $student_id);
+            if ($deleteStmt->execute()) {
+                $message = 'Student deleted successfully!';
+                $message_type = 'success';
+            } else {
+                $message = 'Unable to delete student.';
+                $message_type = 'danger';
+            }
+            $deleteStmt->close();
+        }
+    }
 }
 
-// Get all students
+// Get all students with linked fingerprint summary.
 $students = [];
-$result = $mysqli->query("SELECT id, student_id, first_name, last_name, email, year, section, status FROM students ORDER BY created_at DESC");
+$hasMiddleInitialColumn = studentColumnExists($mysqli, 'middle_initial');
+$hasExtensionColumn = studentColumnExists($mysqli, 'extension');
+$middleInitialExpr = $hasMiddleInitialColumn ? 'COALESCE(s.middle_initial, "")' : '""';
+$extensionExpr = $hasExtensionColumn ? 'COALESCE(s.extension, "")' : '""';
+$fingerprintTableResult = $mysqli->query("SHOW TABLES LIKE 'fingerprints'");
+$hasFingerprintTable = $fingerprintTableResult && $fingerprintTableResult->num_rows > 0;
+$fingerprintStudentColumn = null;
+if ($hasFingerprintTable) {
+    if (tableColumnExists($mysqli, 'fingerprints', 'student_id')) {
+        $fingerprintStudentColumn = 'student_id';
+    } elseif (tableColumnExists($mysqli, 'fingerprints', 'user_id')) {
+        $fingerprintStudentColumn = 'user_id';
+    }
+}
+
+$fingerprintJoinSql = '';
+if ($fingerprintStudentColumn !== null) {
+    $fingerprintJoinSql = "
+    LEFT JOIN (
+        SELECT
+            fp.{$fingerprintStudentColumn} AS student_ref,
+            COUNT(fp.id) AS fingerprint_count,
+            GROUP_CONCAT(CONCAT('F', fp.finger_index, ':', fp.sensor_id) ORDER BY fp.finger_index SEPARATOR ', ') AS fingerprint_list
+        FROM fingerprints fp
+        GROUP BY fp.{$fingerprintStudentColumn}
+    ) fp_summary ON fp_summary.student_ref = s.id
+    ";
+}
+
+$fingerprintCountExpr = $fingerprintStudentColumn !== null ? 'COALESCE(fp_summary.fingerprint_count, 0)' : '0';
+$fingerprintListExpr = $fingerprintStudentColumn !== null ? "COALESCE(fp_summary.fingerprint_list, '')" : "''";
+
+$result = $mysqli->query("
+    SELECT 
+        s.id, 
+        s.first_name, 
+        s.last_name, 
+        {$middleInitialExpr} AS middle_initial,
+        {$extensionExpr} AS extension,
+        s.year, 
+        s.section, 
+        s.status, 
+        {$fingerprintCountExpr} AS fingerprint_count,
+        {$fingerprintListExpr} AS fingerprint_list
+    FROM students s 
+    {$fingerprintJoinSql}
+    ORDER BY s.last_name ASC, s.first_name ASC, s.id ASC
+");
 
 while ($row = $result->fetch_assoc()) {
     $students[] = $row;
+}
+
+$sections = [];
+$years = [];
+foreach ($students as $row) {
+    $year = trim((string)($row['year'] ?? ''));
+    if ($year !== '') {
+        $years[$year] = true;
+    }
+
+    $section = trim((string)($row['section'] ?? ''));
+    if ($section !== '') {
+        $sections[$section] = true;
+    }
+}
+$years = array_keys($years);
+sort($years, SORT_NATURAL | SORT_FLAG_CASE);
+$sections = array_keys($sections);
+sort($sections, SORT_NATURAL | SORT_FLAG_CASE);
+
+$studentListYearFilter = trim((string)($_GET['list_year'] ?? ''));
+$studentListSectionFilter = trim((string)($_GET['list_section'] ?? ''));
+
+$filteredStudents = $students;
+if ($studentListYearFilter !== '') {
+    $filteredStudents = array_values(array_filter($filteredStudents, function (array $row) use ($studentListYearFilter): bool {
+        return (string)($row['year'] ?? '') === $studentListYearFilter;
+    }));
+}
+if ($studentListSectionFilter !== '') {
+    $filteredStudents = array_values(array_filter($filteredStudents, function (array $row) use ($studentListSectionFilter): bool {
+        return strcasecmp(trim((string)($row['section'] ?? '')), $studentListSectionFilter) === 0;
+    }));
+}
+$students = $filteredStudents;
+
+if ($studentListYearFilter !== '') {
+    $sectionsForSelectedYear = [];
+    foreach ($filteredStudents as $row) {
+        $section = trim((string)($row['section'] ?? ''));
+        if ($section !== '') {
+            $sectionsForSelectedYear[$section] = true;
+        }
+    }
+    if (!empty($sectionsForSelectedYear)) {
+        $sections = array_keys($sectionsForSelectedYear);
+        sort($sections, SORT_NATURAL | SORT_FLAG_CASE);
+    }
+}
+
+if ($studentListSectionFilter !== '' && !in_array($studentListSectionFilter, $sections, true)) {
+    $sections[] = $studentListSectionFilter;
+    sort($sections, SORT_NATURAL | SORT_FLAG_CASE);
+}
+
+if ($studentListYearFilter !== '' && !in_array($studentListYearFilter, $years, true)) {
+    $years[] = $studentListYearFilter;
+    sort($years, SORT_NATURAL | SORT_FLAG_CASE);
+}
+
+if (($_GET['export'] ?? '') === 'csv') {
+    $exportScope = trim((string)($_GET['export_scope'] ?? 'filters'));
+    $exportSchoolYear = trim((string)($_GET['export_school_year'] ?? ''));
+    $exportSection = trim((string)($_GET['export_section'] ?? ''));
+    $exportSortBy = trim((string)($_GET['export_sort_by'] ?? 'name'));
+    $exportSortDir = strtolower(trim((string)($_GET['export_sort_dir'] ?? 'desc'))) === 'asc' ? 'asc' : 'desc';
+    $exportNameFormat = trim((string)($_GET['export_name_format'] ?? 'last_name_first'));
+
+    $allowedExportSortBy = ['date', 'last_name', 'first_name', 'year_section', 'remark'];
+    if (!in_array($exportSortBy, $allowedExportSortBy, true)) {
+        $exportSortBy = 'name';
+    }
+
+    $allowedNameFormats = ['full_name', 'last_name_first'];
+    if (!in_array($exportNameFormat, $allowedNameFormats, true)) {
+        $exportNameFormat = 'last_name_first';
+    }
+
+    $teacherAssignmentMap = buildTeacherAssignmentMap($mysqli);
+
+    $exportStudents = array_values(array_filter($students, function (array $student) use ($exportScope, $exportSchoolYear, $exportSection, $teacherAssignmentMap): bool {
+        return studentMatchesExportScope($student, $exportScope, $exportSchoolYear, $exportSection, $teacherAssignmentMap);
+    }));
+    if ($exportSortBy === 'date') {
+        sortStudentsForExport($exportStudents, 'created', $exportSortDir);
+    } elseif ($exportSortBy === 'last_name') {
+        usort($exportStudents, function (array $a, array $b) use ($exportSortDir): int {
+            $cmp = strcasecmp((string)($a['last_name'] ?? ''), (string)($b['last_name'] ?? ''));
+            return ($exportSortDir === 'asc' ? 1 : -1) * ($cmp !== 0 ? $cmp : strcasecmp((string)($a['first_name'] ?? ''), (string)($b['first_name'] ?? '')));
+        });
+    } elseif ($exportSortBy === 'first_name') {
+        usort($exportStudents, function (array $a, array $b) use ($exportSortDir): int {
+            $cmp = strcasecmp((string)($a['first_name'] ?? ''), (string)($b['first_name'] ?? ''));
+            return ($exportSortDir === 'asc' ? 1 : -1) * ($cmp !== 0 ? $cmp : strcasecmp((string)($a['last_name'] ?? ''), (string)($b['last_name'] ?? '')));
+        });
+    } elseif ($exportSortBy === 'year_section') {
+        sortStudentsForExport($exportStudents, 'section', $exportSortDir);
+    } else {
+        sortStudentsForExport($exportStudents, 'status', $exportSortDir);
+    }
+
+    if (ob_get_length() !== false) {
+        ob_end_clean();
+    }
+
+    header('Content-Type: text/csv; charset=UTF-8');
+    header('Content-Disposition: attachment; filename="students_export.csv"');
+
+    $fp = fopen('php://output', 'w');
+    fwrite($fp, "\xEF\xBB\xBF");
+    fputcsv($fp, ['#', 'Name', 'Year', 'Section', 'Fingerprints', 'Status']);
+
+    $idx = 1;
+    foreach ($exportStudents as $student) {
+        fputcsv($fp, [
+            $idx++,
+            formatNameByMode($student, $exportNameFormat),
+            $student['year'] ?? '',
+            $student['section'] ?? '',
+            (int)($student['fingerprint_count'] ?? 0),
+            ucfirst((string)($student['status'] ?? '')),
+        ]);
+    }
+
+    fclose($fp);
+    exit;
 }
 ?>
 
@@ -38,32 +411,76 @@ while ($row = $result->fetch_assoc()) {
 <div class="card mb-4">
     <div class="card-header d-flex justify-content-between align-items-center">
         <h5 class="mb-0">All Students (<?php echo count($students); ?>)</h5>
-        <a href="register.php" class="btn btn-sm btn-primary">
-            <i class="bi bi-person-plus"></i> Add Student
-        </a>
+        <div class="d-flex gap-2">
+            <button type="button" class="btn btn-sm btn-outline-success" data-bs-toggle="modal" data-bs-target="#smartStudentExportModal">
+                <i class="bi bi-file-earmark-csv"></i> Export
+            </button>
+            <a href="register.php" class="btn btn-sm btn-primary">
+                <i class="bi bi-person-plus"></i> Add Student
+            </a>
+        </div>
     </div>
     <div class="card-body">
+        <form method="GET" class="row g-2 align-items-end mb-3 student-filter-bar">
+            <div class="col-lg-3 col-md-4 col-sm-6">
+                <label for="list_year" class="form-label">Year</label>
+                <select class="form-select" id="list_year" name="list_year">
+                    <option value="">All Years</option>
+                    <?php foreach ($years as $year): ?>
+                        <option value="<?php echo htmlspecialchars($year); ?>" <?php echo $studentListYearFilter === (string)$year ? 'selected' : ''; ?>>
+                            Year <?php echo htmlspecialchars($year); ?>
+                        </option>
+                    <?php endforeach; ?>
+                </select>
+            </div>
+            <div class="col-lg-3 col-md-4 col-sm-6">
+                <label for="list_section" class="form-label">Section</label>
+                <select class="form-select" id="list_section" name="list_section">
+                    <option value="">All Sections</option>
+                    <?php foreach ($sections as $section): ?>
+                        <option value="<?php echo htmlspecialchars($section); ?>" <?php echo strcasecmp($studentListSectionFilter, $section) === 0 ? 'selected' : ''; ?>>
+                            <?php echo htmlspecialchars($section); ?>
+                        </option>
+                    <?php endforeach; ?>
+                </select>
+            </div>
+            <div class="col-lg-2 col-md-2 col-sm-3">
+                <button type="submit" class="btn btn-primary w-100">Apply</button>
+            </div>
+            <div class="col-lg-2 col-md-2 col-sm-3">
+                <a href="students.php" class="btn btn-outline-secondary w-100">Reset</a>
+            </div>
+        </form>
+
         <div class="table-responsive">
             <table class="table table-hover mb-0">
                 <thead class="table-light">
                     <tr>
-                        <th>Student ID</th>
+                        <th>#</th>
                         <th>Name</th>
                         <th>Year</th>
                         <th>Section</th>
-                        <th>Email</th>
+                        <th>Fingerprints</th>
                         <th>Status</th>
                         <th>Actions</th>
                     </tr>
                 </thead>
                 <tbody>
+                    <?php $count = 1; ?>
                     <?php foreach ($students as $student): ?>
                     <tr>
-                        <td><strong><?php echo htmlspecialchars($student['student_id']); ?></strong></td>
-                        <td><?php echo htmlspecialchars($student['first_name'] . ' ' . $student['last_name']); ?></td>
+                        <td><?php echo $count++; ?></td>
+                        <td><?php echo htmlspecialchars(formatStudentName($student)); ?></td>
                         <td><?php echo $student['year']; ?></td>
                         <td><?php echo htmlspecialchars($student['section']); ?></td>
-                        <td><small><?php echo htmlspecialchars($student['email']); ?></small></td>
+                        <td>
+                            <?php if ((int)$student['fingerprint_count'] > 0): ?>
+                                <span class="badge bg-primary"><?php echo (int)$student['fingerprint_count']; ?> linked</span>
+                                <div class="small text-muted mt-1"><?php echo htmlspecialchars($student['fingerprint_list']); ?></div>
+                            <?php else: ?>
+                                <span class="badge bg-secondary">No fingerprints</span>
+                            <?php endif; ?>
+                        </td>
                         <td>
                             <?php if ($student['status'] === 'active'): ?>
                                 <span class="badge bg-success">Active</span>
@@ -78,9 +495,6 @@ while ($row = $result->fetch_assoc()) {
                             <a href="student_edit.php?id=<?php echo $student['id']; ?>" class="btn btn-sm btn-warning" title="Edit">
                                 <i class="bi bi-pencil"></i>
                             </a>
-                            <button class="btn btn-sm btn-primary" title="Update Fingerprints" onclick="openFingerprintModal(<?php echo $student['id']; ?>, '<?php echo htmlspecialchars($student['first_name'] . ' ' . $student['last_name']); ?>')">
-                                <i class="bi bi-fingerprint"></i>
-                            </button>
                             <a href="?delete=<?php echo $student['id']; ?>" class="btn btn-sm btn-danger" title="Delete" onclick="return confirm('Delete this student?')">
                                 <i class="bi bi-trash"></i>
                             </a>
@@ -89,6 +503,86 @@ while ($row = $result->fetch_assoc()) {
                     <?php endforeach; ?>
                 </tbody>
             </table>
+        </div>
+    </div>
+</div>
+
+<div class="modal fade" id="smartStudentExportModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered student-export-modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h6 class="modal-title mb-0"><i class="bi bi-funnel"></i> Smart Export Filter</h6>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <form method="GET">
+                <div class="modal-body student-export-modal-body">
+                    <input type="hidden" name="export" value="csv">
+
+                    <div class="row g-2 student-export-grid">
+                        <div class="col-12">
+                            <label for="student_export_scope" class="form-label">Export Scope</label>
+                            <select class="form-select" id="student_export_scope" name="export_scope">
+                                <option value="all" selected>All Students</option>
+                                <option value="school_year">By School Year (teacher assignments)</option>
+                                <option value="section">By Section (optional SY)</option>
+                            </select>
+                        </div>
+
+                        <div class="col-sm-6" id="studentExportSchoolYearGroup" style="display:none;">
+                            <label for="student_export_school_year" class="form-label">School Year</label>
+                            <select class="form-select" id="student_export_school_year" name="export_school_year">
+                                <option value="">Select school year</option>
+                                <?php foreach ($schoolYears as $sy): ?>
+                                    <option value="<?php echo htmlspecialchars((string)$sy['label']); ?>" <?php echo ((string)$sy['label'] === (string)($activeSchoolYear['label'] ?? '')) ? 'selected' : ''; ?>>
+                                        <?php echo htmlspecialchars((string)$sy['label']); ?>
+                                    </option>
+                                <?php endforeach; ?>
+                            </select>
+                        </div>
+
+                        <div class="col-sm-6" id="studentExportSectionGroup" style="display:none;">
+                            <label for="student_export_section" class="form-label">Section</label>
+                            <select class="form-select" id="student_export_section" name="export_section">
+                                <option value="">Select section</option>
+                                <?php foreach ($sections as $section): ?>
+                                    <option value="<?php echo htmlspecialchars($section); ?>"><?php echo htmlspecialchars($section); ?></option>
+                                <?php endforeach; ?>
+                            </select>
+                        </div>
+
+                        <div class="col-8" id="studentExportSortGroup">
+                            <label for="student_export_sort_by" class="form-label">Sort By</label>
+                            <select class="form-select" id="student_export_sort_by" name="export_sort_by">
+                                <option value="date">Date</option>
+                                <option value="last_name" selected>Last name</option>
+                                <option value="first_name">First name</option>
+                                <option value="year_section">Year/Section</option>
+                                <option value="remark">Remark</option>
+                            </select>
+                        </div>
+
+                        <div class="col-4" id="studentExportSortDirGroup">
+                            <label for="student_export_sort_dir" class="form-label">Dir</label>
+                            <select class="form-select" id="student_export_sort_dir" name="export_sort_dir">
+                                <option value="asc">Asc</option>
+                                <option value="desc" selected>Desc</option>
+                            </select>
+                        </div>
+
+                        <div class="col-12" id="studentExportNameFormatGroup">
+                            <label for="student_export_name_format" class="form-label">Name Format</label>
+                            <select class="form-select" id="student_export_name_format" name="export_name_format">
+                                <option value="full_name">Full name (First name MI Last name Ext)</option>
+                                <option value="last_name_first" selected>Last name, First name MI Ext</option>
+                            </select>
+                        </div>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-sm btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                    <button type="submit" class="btn btn-sm btn-success"><i class="bi bi-download"></i> Export</button>
+                </div>
+            </form>
         </div>
     </div>
 </div>
@@ -115,469 +609,100 @@ while ($row = $result->fetch_assoc()) {
         padding: 0.4rem 0.6rem;
         font-size: 0.85rem;
     }
+
+    .student-filter-bar {
+        margin-bottom: 0.75rem !important;
+    }
+
+    .student-filter-bar .form-label {
+        font-size: 0.9rem;
+        margin-bottom: 0.3rem;
+    }
+
+    .student-filter-bar .form-select,
+    .student-filter-bar .btn {
+        min-height: 36px;
+        padding-top: 0.25rem;
+        padding-bottom: 0.25rem;
+        font-size: 0.9rem;
+    }
+
+    .student-export-modal-dialog {
+        max-width: 440px;
+    }
+
+    #smartStudentExportModal .modal-header,
+    #smartStudentExportModal .modal-body,
+    #smartStudentExportModal .modal-footer {
+        padding: 0.65rem 0.8rem;
+    }
+
+    #smartStudentExportModal .modal-header {
+        border-bottom-width: 1px;
+    }
+
+    #smartStudentExportModal .form-label {
+        font-size: 0.85rem;
+        margin-bottom: 0.2rem;
+    }
+
+    #smartStudentExportModal .form-select {
+        min-height: 32px;
+        padding-top: 0.2rem;
+        padding-bottom: 0.2rem;
+        font-size: 0.85rem;
+    }
+
+    #smartStudentExportModal .modal-footer {
+        gap: 0.35rem;
+    }
+
+    #smartStudentExportModal .student-export-grid {
+        row-gap: 0.45rem !important;
+    }
+
+    #smartStudentExportModal .btn-sm {
+        font-size: 0.8rem;
+        padding: 0.3rem 0.55rem;
+    }
 </style>
 
-<!-- Fingerprint Update Modal -->
-<div class="modal fade" id="fingerprintModal" tabindex="-1" data-bs-backdrop="static" data-bs-keyboard="false">
-    <div class="modal-dialog modal-lg modal-dialog-centered">
-        <div class="modal-content">
-            <div class="modal-header">
-                <h5 class="modal-title"><i class="bi bi-fingerprint"></i> Update Fingerprints</h5>
-                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
-            </div>
-            <div class="modal-body p-4">
-                <div class="mb-3">
-                    <h6>Student: <span id="studentName" class="text-primary"></span></h6>
-                    <p class="text-muted">Update fingerprint data for this student</p>
-                </div>
-
-                <!-- Step 1: Select Number of Fingers -->
-                <div id="step1SelectFingers">
-                    <h5 class="mb-4 text-center">How many fingers do you want to enroll?</h5>
-                    <p class="text-muted text-center mb-4">Each finger will be scanned <strong>5 times</strong> for accuracy</p>
-                    
-                    <div class="finger-selector">
-                        <button type="button" class="finger-btn" data-fingers="1">
-                            <i class="bi bi-hand-index-thumb"></i>
-                            <span>1 Finger</span>
-                        </button>
-                        <button type="button" class="finger-btn" data-fingers="2">
-                            <i class="bi bi-hand-index-thumb"></i>
-                            <span>2 Fingers</span>
-                        </button>
-                        <button type="button" class="finger-btn" data-fingers="3">
-                            <i class="bi bi-hand-index-thumb"></i>
-                            <span>3 Fingers</span>
-                        </button>
-                        <button type="button" class="finger-btn" data-fingers="4">
-                            <i class="bi bi-hand-index-thumb"></i>
-                            <span>4 Fingers</span>
-                        </button>
-                        <button type="button" class="finger-btn" data-fingers="5">
-                            <i class="bi bi-hand-index-thumb"></i>
-                            <span>5 Fingers</span>
-                        </button>
-                    </div>
-                </div>
-
-                <!-- Step 2: Enrollment Progress -->
-                <div id="step2EnrollmentProgress" style="display: none;">
-                    <div class="enrollment-header mb-4">
-                        <h5 id="currentFingerTitle">Enrolling Finger 1 of 1</h5>
-                        <p class="text-muted mb-0">Place your finger on the scanner <strong>5 times</strong></p>
-                    </div>
-
-                    <div id="scanProgress" class="mb-4">
-                        <div class="scan-attempts">
-                            <div class="scan-attempt" id="scan1">
-                                <div class="scan-circle"><i class="bi bi-fingerprint"></i></div>
-                                <small>Scan 1</small>
-                            </div>
-                            <div class="scan-attempt" id="scan2">
-                                <div class="scan-circle"><i class="bi bi-fingerprint"></i></div>
-                                <small>Scan 2</small>
-                            </div>
-                            <div class="scan-attempt" id="scan3">
-                                <div class="scan-circle"><i class="bi bi-fingerprint"></i></div>
-                                <small>Scan 3</small>
-                            </div>
-                            <div class="scan-attempt" id="scan4">
-                                <div class="scan-circle"><i class="bi bi-fingerprint"></i></div>
-                                <small>Scan 4</small>
-                            </div>
-                            <div class="scan-attempt" id="scan5">
-                                <div class="scan-circle"><i class="bi bi-fingerprint"></i></div>
-                                <small>Scan 5</small>
-                            </div>
-                        </div>
-                    </div>
-
-                    <div class="alert alert-info" id="statusMessage">
-                        <i class="bi bi-info-circle"></i> <span id="statusText">Waiting for scanner...</span>
-                    </div>
-
-                    <div class="d-flex gap-2 justify-content-between">
-                        <button type="button" class="btn btn-secondary" id="btnCancelEnrollment">
-                            <i class="bi bi-x-circle"></i> Cancel
-                        </button>
-                        <div class="d-flex gap-2">
-                            <button type="button" class="btn btn-warning" id="btnRetryFinger" style="display: none;">
-                                <i class="bi bi-arrow-clockwise"></i> Retry This Finger
-                            </button>
-                            <button type="button" class="btn btn-primary" id="btnNextFinger" style="display: none;">
-                                <i class="bi bi-arrow-right"></i> Next Finger
-                            </button>
-                        </div>
-                    </div>
-                </div>
-
-                <!-- Step 3: Completion -->
-                <div id="step3Complete" style="display: none;">
-                    <div class="text-center py-4">
-                        <div class="success-icon mb-3">
-                            <i class="bi bi-check-circle-fill text-success" style="font-size: 4rem;"></i>
-                        </div>
-                        <h4 class="text-success mb-3">Update Complete!</h4>
-                        <p class="text-muted" id="completionMessage">All fingerprints updated successfully</p>
-                        <button type="button" class="btn btn-primary mt-3" data-bs-dismiss="modal">
-                            <i class="bi bi-check"></i> Done
-                        </button>
-                    </div>
-                </div>
-
-            </div>
-        </div>
-    </div>
-</div>
-
-<style>
-/* Fingerprint Modal Styles */
-.finger-selector {
-    display: flex;
-    gap: 15px;
-    justify-content: center;
-    flex-wrap: wrap;
-}
-
-.finger-btn {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    padding: 20px;
-    border: 2px solid #e5e7eb;
-    border-radius: 12px;
-    background: white;
-    cursor: pointer;
-    transition: all 0.3s ease;
-    min-width: 100px;
-}
-
-.finger-btn:hover {
-    border-color: #3b82f6;
-    background: #f8faff;
-    transform: translateY(-2px);
-}
-
-.finger-btn.selected {
-    border-color: #3b82f6;
-    background: #3b82f6;
-    color: white;
-}
-
-.finger-btn i {
-    font-size: 2rem;
-    margin-bottom: 8px;
-}
-
-.scan-attempts {
-    display: flex;
-    justify-content: center;
-    gap: 15px;
-    flex-wrap: wrap;
-}
-
-.scan-attempt {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: 8px;
-}
-
-.scan-circle {
-    width: 60px;
-    height: 60px;
-    border: 3px solid #e5e7eb;
-    border-radius: 50%;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    background: #f9fafb;
-    transition: all 0.3s ease;
-}
-
-.scan-circle i {
-    font-size: 1.5rem;
-    color: #9ca3af;
-}
-
-.scan-circle.scanning {
-    border-color: #3b82f6;
-    background: #eff6ff;
-    animation: pulse 2s infinite;
-}
-
-.scan-circle.scanning i {
-    color: #3b82f6;
-}
-
-.scan-circle.success {
-    border-color: #10b981;
-    background: #ecfdf5;
-}
-
-.scan-circle.success i {
-    color: #10b981;
-}
-
-.scan-circle.success {
-    border-color: #10b981;
-    background: #ecfdf5;
-}
-
-.scan-circle.success i {
-    color: #10b981;
-}
-
-.scan-circle.error {
-    border-color: #ef4444;
-    background: #fef2f2;
-}
-
-.scan-circle.error i {
-    color: #ef4444;
-}
-
-@keyframes pulse {
-    0%, 100% { transform: scale(1); }
-    50% { transform: scale(1.1); }
-}
-
-.enrollment-header {
-    text-align: center;
-    border-bottom: 1px solid #e5e7eb;
-    padding-bottom: 15px;
-}
-</style>
-
-<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
 <script>
-// Fingerprint Modal State
-let updateState = {
-    modal: null,
-    studentId: null,
-    studentName: '',
-    scannerOnline: false,
-    numFingers: 0,
-    currentFinger: 1,
-    currentScan: 1,
-    enrolledFingerprints: []
-};
+document.addEventListener('DOMContentLoaded', function () {
+    const exportScope = document.getElementById('student_export_scope');
+    const exportSection = document.getElementById('student_export_section');
+    const schoolYearGroup = document.getElementById('studentExportSchoolYearGroup');
+    const sectionGroup = document.getElementById('studentExportSectionGroup');
+    const sortByGroup = document.getElementById('studentExportSortGroup');
+    const sortDirGroup = document.getElementById('studentExportSortDirGroup');
+    const nameFormatGroup = document.getElementById('studentExportNameFormatGroup');
 
-// Initialize modal when page loads
-document.addEventListener('DOMContentLoaded', function() {
-    updateState.modal = new bootstrap.Modal(document.getElementById('fingerprintModal'));
-    
-    // Finger selection buttons
-    document.querySelectorAll('.finger-btn').forEach(btn => {
-        btn.addEventListener('click', function() {
-            document.querySelectorAll('.finger-btn').forEach(b => b.classList.remove('selected'));
-            this.classList.add('selected');
-            updateState.numFingers = parseInt(this.dataset.fingers);
-            
-            setTimeout(() => startEnrollment(), 500);
-        });
-    });
-    
-    // Cancel button
-    document.getElementById('btnCancelEnrollment').addEventListener('click', function() {
-        resetModal();
-        updateState.modal.hide();
-    });
-    
-    // Reset modal when closed
-    document.getElementById('fingerprintModal').addEventListener('hidden.bs.modal', function() {
-        resetModal();
-    });
-});
-
-function openFingerprintModal(studentId, studentName) {
-    updateState.studentId = studentId;
-    updateState.studentName = studentName;
-    
-    document.getElementById('studentName').textContent = studentName;
-    resetModal();
-    updateState.modal.show();
-}
-
-async function startEnrollment() {
-    document.getElementById('step1SelectFingers').style.display = 'none';
-    document.getElementById('step2EnrollmentProgress').style.display = 'block';
-    
-    updateState.currentFinger = 1;
-    updateState.currentScan = 1;
-    updateState.enrolledFingerprints = [];
-    
-    updateProgress();
-
-    const isOnline = await checkScannerOnline(true);
-    if (isOnline) {
-        simulateScanning();
-    }
-}
-
-function updateProgress() {
-    document.getElementById('currentFingerTitle').textContent = 
-        `Enrolling Finger ${updateState.currentFinger} of ${updateState.numFingers}`;
-    
-    // Reset scan circles
-    document.querySelectorAll('.scan-circle').forEach(circle => {
-        circle.classList.remove('scanning', 'success');
-    });
-    
-    // Show current scan as scanning
-    const currentCircle = document.getElementById(`scan${updateState.currentScan}`);
-    if (currentCircle) {
-        currentCircle.classList.add('scanning');
-    }
-}
-
-async function simulateScanning() {
-    const isOnline = await checkScannerOnline(true);
-    if (!isOnline) {
+    if (!exportScope || !exportSection || !schoolYearGroup || !sectionGroup || !sortByGroup || !sortDirGroup || !nameFormatGroup) {
         return;
     }
 
-    // Show waiting for ESP32 scanner message
-    const statusDiv = document.getElementById('statusMessage');
-    statusDiv.innerHTML = `
-        <div class="d-flex align-items-center">
-            <i class="bi bi-wifi me-2 text-success"></i>
-            <div>
-                <strong>Scanner Online - Waiting for ESP32</strong><br>
-                <small>Finger ${updateState.currentFinger}, Scan ${updateState.currentScan}/5</small><br>
-                <small class="text-muted">Place finger ${updateState.currentFinger} on the fingerprint scanner</small>
-            </div>
-        </div>
-        <div class="mt-3">
-            <button type="button" class="btn btn-sm btn-success" onclick="completeScan()">
-                <i class="bi bi-fingerprint"></i> Simulate Scan (Testing Only)
-            </button>
-            <small class="d-block text-muted mt-1">This button simulates ESP32 sending scan data</small>
-        </div>
-    `;
-    
-    // Don't auto-proceed - wait for manual trigger or real ESP32 data
-}
+    const syncExportScope = () => {
+        const mode = exportScope.value;
+        schoolYearGroup.style.display = (mode === 'school_year' || mode === 'section') ? '' : 'none';
+        sectionGroup.style.display = mode === 'section' ? '' : 'none';
 
-async function checkScannerOnline(showStatus = false) {
-    const statusDiv = document.getElementById('statusMessage');
+        const requireSectionFirst = (mode === 'section');
+        const canShowTailOptions = !requireSectionFirst || (exportSection.value.trim() !== '');
+        sortByGroup.style.display = canShowTailOptions ? '' : 'none';
+        sortDirGroup.style.display = canShowTailOptions ? '' : 'none';
+        nameFormatGroup.style.display = canShowTailOptions ? '' : 'none';
+    };
 
-    try {
-        const response = await fetch('../api/scanner_status.php');
-        const data = await response.json();
-        const isOnline = !!(response.ok && data.success && data.scanner && data.scanner.online);
-        updateState.scannerOnline = isOnline;
-
-        if (showStatus && !isOnline) {
-            statusDiv.className = 'alert alert-danger';
-            statusDiv.innerHTML = `
-                <div class="d-flex align-items-center justify-content-between gap-2 flex-wrap">
-                    <div class="d-flex align-items-center">
-                        <i class="bi bi-wifi-off me-2"></i>
-                        <div>
-                            <strong>Scanner Offline</strong><br>
-                            <small>${(data.scanner && data.scanner.message) ? data.scanner.message : 'No recent heartbeat from scanner'}</small>
-                        </div>
-                    </div>
-                    <button type="button" class="btn btn-sm btn-outline-danger" onclick="simulateScanning()">
-                        <i class="bi bi-arrow-clockwise"></i> Retry Check
-                    </button>
-                </div>
-            `;
-        }
-
-        return isOnline;
-    } catch (error) {
-        updateState.scannerOnline = false;
-
-        if (showStatus) {
-            statusDiv.className = 'alert alert-danger';
-            statusDiv.innerHTML = `
-                <div class="d-flex align-items-center justify-content-between gap-2 flex-wrap">
-                    <div class="d-flex align-items-center">
-                        <i class="bi bi-wifi-off me-2"></i>
-                        <div>
-                            <strong>Scanner Offline</strong><br>
-                            <small>Status check failed. Verify scanner and server connection.</small>
-                        </div>
-                    </div>
-                    <button type="button" class="btn btn-sm btn-outline-danger" onclick="simulateScanning()">
-                        <i class="bi bi-arrow-clockwise"></i> Retry Check
-                    </button>
-                </div>
-            `;
-        }
-
-        return false;
-    }
-}
-
-function completeScan() {
-    const currentCircle = document.getElementById(`scan${updateState.currentScan}`);
-    if (currentCircle) {
-        currentCircle.classList.remove('scanning');
-        currentCircle.classList.add('success');
-        currentCircle.innerHTML = '<i class="bi bi-check"></i>';
-    }
-    
-    updateState.currentScan++;
-    
-    if (updateState.currentScan <= 5) {
-        // Continue with next scan for same finger
-        setTimeout(() => {
-            updateProgress();
-            simulateScanning();
-        }, 1000);
-    } else {
-        // Finger complete
-        updateState.enrolledFingerprints.push({
-            finger: updateState.currentFinger,
-            scans: 5
-        });
-        
-        document.getElementById('statusText').textContent = 
-            `Finger ${updateState.currentFinger} completed successfully!`;
-        
-        setTimeout(() => {
-            if (updateState.currentFinger < updateState.numFingers) {
-                // Move to next finger
-                updateState.currentFinger++;
-                updateState.currentScan = 1;
-                updateProgress();
-                simulateScanning();
-            } else {
-                // All fingers complete
-                showCompletion();
-            }
-        }, 1500);
-    }
-}
-
-function showCompletion() {
-    document.getElementById('step2EnrollmentProgress').style.display = 'none';
-    document.getElementById('step3Complete').style.display = 'block';
-    
-    document.getElementById('completionMessage').textContent = 
-        `Scans completed for ${updateState.studentName}. Use Edit Student page to persist fingerprint updates.`;
-}
-
-function resetModal() {
-    document.getElementById('step1SelectFingers').style.display = 'block';
-    document.getElementById('step2EnrollmentProgress').style.display = 'none';
-    document.getElementById('step3Complete').style.display = 'none';
-    
-    document.querySelectorAll('.finger-btn').forEach(b => b.classList.remove('selected'));
-    document.querySelectorAll('.scan-circle').forEach(circle => {
-        circle.classList.remove('scanning', 'success');
-        circle.innerHTML = '<i class="bi bi-fingerprint"></i>';
-    });
-    
-    updateState.numFingers = 0;
-    updateState.currentFinger = 1;
-    updateState.currentScan = 1;
-    updateState.enrolledFingerprints = [];
-    updateState.scannerOnline = false;
-}
+    exportScope.addEventListener('change', syncExportScope);
+    exportSection.addEventListener('change', syncExportScope);
+    syncExportScope();
+});
 </script>
 
-<?php require '../includes/footer.php'; ?>
+<?php require '../includes/footer.php'; /*
+ * � 2026 TambyTech.
+ * This source code is proprietary and confidential.
+ * Any unauthorized use, copying, modification, distribution, or disclosure is strictly prohibited.
+ * All rights reserved.
+ */
+?>

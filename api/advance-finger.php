@@ -1,0 +1,87 @@
+<?php
+
+declare(strict_types=1);
+
+require_once __DIR__ . '/common.php';
+require_once __DIR__ . '/../config/db.php';
+
+require_method('POST');
+
+function advanceFingerColumnExists(mysqli $mysqli, string $column): bool
+{
+    $safe = $mysqli->real_escape_string($column);
+    $result = $mysqli->query("SHOW COLUMNS FROM device_commands LIKE '{$safe}'");
+    return $result && $result->num_rows > 0;
+}
+
+try {
+    $input = read_json_body();
+
+    $studentId = require_positive_int($input, 'student_id');
+    $currentFingerIndex = require_positive_int($input, 'finger_index');
+    if ($currentFingerIndex !== 1) {
+        api_response(400, [
+            'success' => false,
+            'message' => 'Only finger_index 1 is supported'
+        ]);
+    }
+
+    $linkColumn = advanceFingerColumnExists($mysqli, 'student_id') ? 'student_id' : (advanceFingerColumnExists($mysqli, 'user_id') ? 'user_id' : null);
+    if ($linkColumn === null) {
+        api_response(500, [
+            'success' => false,
+            'message' => 'device_commands must contain student_id or user_id column'
+        ]);
+    }
+
+    $updatedOrderColumn = advanceFingerColumnExists($mysqli, 'updated_at') ? 'updated_at' : 'id';
+
+    // Find the completed command for this finger to get total_fingers.
+    $commandStmt = $mysqli->prepare("SELECT id, device_id, error_message FROM device_commands WHERE mode = 'ENROLL' AND {$linkColumn} = ? AND finger_index = ? AND status = 'COMPLETED' ORDER BY {$updatedOrderColumn} DESC LIMIT 1");
+    $commandStmt->bind_param('ii', $studentId, $currentFingerIndex);
+    $commandStmt->execute();
+    $command = $commandStmt->get_result()->fetch_assoc();
+
+    if (!$command) {
+        api_response(400, [
+            'success' => false,
+            'message' => 'No completed enrollment found for this finger'
+        ]);
+    }
+
+    $deviceId = (int)$command['device_id'];
+
+    $mysqli->begin_transaction();
+
+    // Single-fingerprint mode: switch to IDLE immediately after first completed finger.
+    $idleCommandStmt = $mysqli->prepare("INSERT INTO device_commands (device_id, mode, status) VALUES (?, 'IDLE', 'PENDING')");
+    $idleCommandStmt->bind_param('i', $deviceId);
+    $idleCommandStmt->execute();
+
+    $mysqli->commit();
+
+    api_response(200, [
+        'success' => true,
+        'message' => 'Enrollment complete',
+        'next_finger_index' => null,
+        'total_fingers' => 1,
+        'enrollment_complete' => true
+    ]);
+} catch (Throwable $e) {
+    if (isset($mysqli) && $mysqli->errno) {
+        $mysqli->rollback();
+    }
+
+    api_response(500, [
+        'success' => false,
+        'message' => 'Failed to advance finger',
+        'error' => $e->getMessage()
+    ]);
+}
+
+/*
+ * © 2026 TambyTech.
+ * This source code is proprietary and confidential.
+ * Any unauthorized use, copying, modification, distribution, or disclosure is strictly prohibited.
+ * All rights reserved.
+ */

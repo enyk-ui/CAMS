@@ -1,44 +1,43 @@
 <?php
-/**
- * Set Mode API
- * Called by registration/attendance pages to set the current system mode
- * This tells the Arduino scanner which mode to operate in
- */
 
-header('Content-Type: application/json');
-require_once '../config/db.php';
+declare(strict_types=1);
 
-$data = json_decode(file_get_contents('php://input'), true);
+require_once __DIR__ . '/common.php';
+require_once __DIR__ . '/../config/db.php';
 
-if (!$data) {
-    $mode = $_POST['mode'] ?? $_GET['mode'] ?? 'attendance';
-} else {
-    $mode = $data['mode'] ?? 'attendance';
-}
-
-if (!in_array($mode, ['registration', 'attendance'], true)) {
-    echo json_encode([
-        'success' => false,
-        'message' => 'Invalid mode. Must be "registration" or "attendance"'
-    ]);
-    exit;
-}
+require_method('POST');
 
 try {
-    $stmt = $mysqli->prepare("INSERT INTO settings (setting_key, setting_value, description, updated_at) VALUES ('current_mode', ?, 'Current scanner mode', NOW()) ON DUPLICATE KEY UPDATE setting_value = VALUES(setting_value), updated_at = NOW()");
-    $stmt->bind_param("s", $mode);
-    $stmt->execute();
+    $input = read_json_body();
+    $mode = strtolower(trim((string)($input['mode'] ?? '')));
 
-    echo json_encode([
+    if ($mode !== 'registration' && $mode !== 'attendance') {
+        api_response(400, [
+            'success' => false,
+            'message' => 'Invalid mode'
+        ]);
+    }
+
+    if ($mode === 'attendance') {
+        $cancelStmt = $mysqli->prepare("UPDATE device_commands SET status = 'FAILED', error_message = 'Mode switched to attendance' WHERE mode = 'ENROLL' AND status IN ('PENDING','IN_PROGRESS')");
+        $cancelStmt->execute();
+    }
+
+    api_response(200, [
         'success' => true,
-        'mode' => $mode,
-        'message' => "Mode set to $mode"
+        'mode' => $mode
     ]);
-
-} catch (Exception $e) {
-    echo json_encode([
+} catch (Throwable $e) {
+    api_response(500, [
         'success' => false,
-        'message' => 'Database error: ' . $e->getMessage()
+        'message' => 'Failed to set mode',
+        'error' => $e->getMessage()
     ]);
 }
-?>
+
+/*
+ * © 2026 TambyTech.
+ * This source code is proprietary and confidential.
+ * Any unauthorized use, copying, modification, distribution, or disclosure is strictly prohibited.
+ * All rights reserved.
+ */

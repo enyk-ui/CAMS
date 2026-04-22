@@ -57,18 +57,15 @@ $tables = [
     "students" => "
         CREATE TABLE IF NOT EXISTS students (
             id INT AUTO_INCREMENT PRIMARY KEY,
-            student_id VARCHAR(50) NOT NULL UNIQUE,
             first_name VARCHAR(100) NOT NULL,
             middle_initial VARCHAR(10),
             last_name VARCHAR(100) NOT NULL,
-            email VARCHAR(100) UNIQUE,
+            extension VARCHAR(20) DEFAULT NULL,
             year INT,
             section VARCHAR(50),
             status ENUM('active', 'inactive', 'graduated') DEFAULT 'active',
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-            INDEX idx_student_id (student_id),
-            INDEX idx_email (email)
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     ",
 
@@ -242,8 +239,8 @@ if ($mysqli->query($teacher_sql)) {
 $output[] = "\n👤 Seeding sample data...";
 
 $sample_student = "INSERT IGNORE INTO students
-    (student_id, first_name, last_name, email, year, section, status)
-    VALUES ('2024-001', 'Juan', 'Dela Cruz', 'juan@student.edu.ph', 1, 'A', 'active')";
+    (first_name, last_name, year, section, status)
+    VALUES ('Juan', 'Dela Cruz', 1, 'A', 'active')";
 
 if ($mysqli->query($sample_student)) {
     $output[] = "✅ Sample student created";
@@ -272,10 +269,8 @@ $views = [
         CREATE OR REPLACE VIEW student_attendance_history AS
         SELECT
             s.id,
-            s.student_id,
             s.first_name,
             s.last_name,
-            s.email,
             a.attendance_date,
             a.time_in_am,
             a.time_out_am,
@@ -286,7 +281,7 @@ $views = [
         FROM students s
         LEFT JOIN attendance a ON s.id = a.student_id
         WHERE s.status = 'active'
-        ORDER BY s.student_id, a.attendance_date DESC
+        ORDER BY s.id, a.attendance_date DESC
     "
 ];
 
@@ -306,4 +301,10 @@ $mysqli->close();
 // Return result
 header('Content-Type: application/json');
 echo json_encode($output, JSON_PRETTY_PRINT);
+/*
+ * � 2026 TambyTech.
+ * This source code is proprietary and confidential.
+ * Any unauthorized use, copying, modification, distribution, or disclosure is strictly prohibited.
+ * All rights reserved.
+ */
 ?>
